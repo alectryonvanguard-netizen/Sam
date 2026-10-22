@@ -2,15 +2,12 @@ name: Build Nexa AI APK
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,39 +16,93 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
 
-      # Debug APK (always built)
+      - name: Assemble project
+        run: |
+          D=nexa-build
+          mkdir -p $D/app/src/main/java/com/nexa/ai
+          cp MainActivity.kt FloatingService.kt $D/app/src/main/java/com/nexa/ai/
+
+          cat > $D/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "NexaAI"
+          include(":app")
+          EOF
+
+          cat > $D/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+          }
+          EOF
+
+          printf 'org.gradle.jvmargs=-Xmx2g\nandroid.useAndroidX=true\n' > $D/gradle.properties
+
+          cat > $D/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+          android {
+              namespace = "com.nexa.ai"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.nexa.ai"
+                  minSdk = 29
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+              buildFeatures { compose = true }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+          }
+          EOF
+
+          cat > $D/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <queries><intent><action android:name="android.speech.action.RECOGNIZE_SPEECH"/></intent></queries>
+              <application android:label="Nexa AI" android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".FloatingService" android:exported="false"/>
+              </application>
+          </manifest>
+          EOF
+
       - name: Build debug APK
+        working-directory: nexa-build
         run: gradle assembleDebug --stacktrace
 
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: NexaAI-debug
-          path: app/build/outputs/apk/debug/*.apk
-
-      # Signed release APK (only when keystore secrets exist)
-      - name: Decode keystore
-        if: env.KEYSTORE_BASE64 != ''
-        run: echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
-
-      - name: Build signed release APK
-        if: env.KEYSTORE_BASE64 != ''
-        env:
-          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle assembleRelease --stacktrace
-
-      - name: Upload release APK
-        if: env.KEYSTORE_BASE64 != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: NexaAI-release
-          path: app/build/outputs/apk/release/*.apk
+          path: nexa-build/app/build/outputs/apk/debug/*.apk
