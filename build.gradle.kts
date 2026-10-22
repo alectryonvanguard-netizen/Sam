@@ -13,6 +13,23 @@ android {
         versionCode = 1
         versionName = "1.0.0"
     }
+    // Release signing is used only when these env vars are set (GitHub Actions secrets)
+    val ks = System.getenv("KEYSTORE_PATH")
+    signingConfigs {
+        if (ks != null) create("release") {
+            storeFile = file(ks)
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
+        }
+    }
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (ks != null) signingConfig = signingConfigs.getByName("release")
+        }
+    }
     buildFeatures { compose = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
