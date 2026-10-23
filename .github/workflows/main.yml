@@ -48,7 +48,7 @@ jobs:
           if sig in s:
               helper = """private val TEXT_MODELS = listOf("gemini-3.8-flash", "gemini-3.6-flash")
           private fun call(model: String, body: JSONObject): JSONObject {
-              if (!model.startsWith("gemini-3")) return callOnce(model, body)
+              if (!model.startsWith("gemini-3") || model.contains("image")) return callOnce(model, body)
               var last = JSONObject()
               for (m in TEXT_MODELS) {
                   for (attempt in 0..1) {
@@ -86,7 +86,12 @@ jobs:
                   val g = groqText(prompt)
                   if (g != null) return g
               }
-              return geminiText(prompt, bmp)
+              val gem = geminiText(prompt, bmp)
+              if (bmp == null && (gem.startsWith("Error") || gem.startsWith("Nexa isn't"))) {
+                  val o = olyntaqText(prompt)
+                  if (o != null) return o
+              }
+              return gem
           }
           private fun groqText(prompt: String): String? {
               for (m in listOf("llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant")) {
@@ -112,6 +117,7 @@ jobs:
               print("WARNING: text() not found, Groq not added")
 
           isig = "fun image(prompt: String): Pair<Bitmap?, String> {"
+          s = s.replace("gemini-2.0-flash-preview-image-generation", "gemini-3.1-flash-image-preview")
           if isig in s:
               newimg = """fun image(prompt: String): Pair<Bitmap?, String> {
               var why = "Could not create the image. Check your internet and try again."
@@ -125,12 +131,117 @@ jobs:
                       if (bm != null) return bm to ""
                   } else if (c.responseCode == 429) why = "The free image service is busy. Wait about 20 seconds and try again."
               } catch (e: Exception) { why = "Image service not reachable: " + e.message }
+              if (BuildConfig.GEMINI_KEY.isNotBlank()) {
+                  val g = geminiImage(prompt)
+                  if (g.first != null) return g
+              }
               return null to why
           }
           private fun geminiImage(prompt: String): Pair<Bitmap?, String> {"""
               s = s.replace(isig, newimg, 1)
           else:
               print("WARNING: image() not found, image fix not added")
+
+          # 4) chat: a new message replaces the unfinished answer; history is titled by topic and saved
+          def sub1(old, new, label, rx=False):
+              global s
+              s2 = re.sub(old, lambda m: new, s, count=1) if rx else s.replace(old, new, 1)
+              if s2 == s:
+                  print("WARNING: " + label + " not found, skipped")
+              s = s2
+
+          sub1("var busy by mutableStateOf(false);", "var turn = 0; var busy by mutableStateOf(false);", "Store.busy")
+          sub1(r"class Chat\(val title: String\)\s*\{\s*val msgs = mutableStateListOf<Msg>\(\)\s*\}",
+               "class Chat(title0: String) { var title by mutableStateOf(title0); var named = false; val msgs = mutableStateListOf<Msg>() }", "Chat class", True)
+          sub1("c.msgs.add(Msg(text, true, bmp)); busy = true", "c.msgs.add(Msg(text, true, bmp)); busy = true; turn += 1; val my = turn", "ask start")
+          sub1("c.msgs.add(Msg(r, false)); busy = false", "if (my != turn) return@launch\n        c.msgs.add(Msg(r, false)); busy = false", "ask reply")
+          sub1("done(r)", """done(r)
+                  if (!c.named) {
+                      c.named = true
+                      val first = c.msgs.firstOrNull { it.mine }?.text ?: text
+                      val t = withContext(Dispatchers.IO) { Gemini.title(first) }
+                      if (t.isNotBlank()) c.title = t
+                  }
+                  saveChats(ctx)""", "topic title")
+          sub1("input.isNotBlank() && !Store.busy", "input.isNotBlank()", "send while busy")
+          sub1("fun langTag() = when (lang) {", """fun saveChats(c: Context) {
+                  try {
+                      val arr = JSONArray()
+                      for (ch in chats) {
+                          val ms = JSONArray()
+                          for (x in ch.msgs) ms.put(JSONObject().put("t", x.text).put("m", x.mine))
+                          arr.put(JSONObject().put("title", ch.title).put("msgs", ms))
+                      }
+                      File(c.filesDir, "chats.json").writeText(arr.toString())
+                  } catch (e: Exception) { }
+              }
+              fun loadChats(c: Context) {
+                  try {
+                      val f = File(c.filesDir, "chats.json")
+                      if (!f.exists()) return
+                      val arr = JSONArray(f.readText())
+                      chats.clear()
+                      for (i in 0 until arr.length()) {
+                          val o = arr.getJSONObject(i)
+                          val ch = Chat(o.getString("title")); ch.named = true
+                          val ms = o.getJSONArray("msgs")
+                          for (j in 0 until ms.length()) { val x = ms.getJSONObject(j); ch.msgs.add(Msg(x.getString("t"), x.getBoolean("m"))) }
+                          chats.add(ch)
+                      }
+                  } catch (e: Exception) { }
+              }
+              fun langTag() = when (lang) {""", "chat saving")
+          sub1('prefs = c.getSharedPreferences("nexa", 0)', 'prefs = c.getSharedPreferences("nexa", 0); loadChats(c)', "load chats")
+          sub1("private fun groqText(prompt: String): String? {", """fun title(q: String): String {
+              val r = text("Write a title of 2 to 5 words for the main topic of this message. Reply with only the title, no quotes. Message: " + q.take(300), null)
+              if (r.startsWith("Error") || r.startsWith("Nexa isn't")) return ""
+              return r.lines().first().trim().trim('"', '*', '.').take(40)
+          }
+          private fun olyntaqText(prompt: String): String? {
+              val base = "https://olyntaq-api-djjp.onrender.com"
+              val urls = listOf(base + "/api/chat", base + "/chat")
+              for (u in urls) {
+                  try {
+                      val c = URL(u).openConnection() as HttpURLConnection
+                      c.connectTimeout = 8000; c.readTimeout = 30000
+                      c.requestMethod = "POST"; c.doOutput = true
+                      c.setRequestProperty("Content-Type", "application/json")
+                      if (BuildConfig.OLYNTAQ_KEY.isNotBlank()) {
+                          c.setRequestProperty("Authorization", "Bearer " + BuildConfig.OLYNTAQ_KEY)
+                          c.setRequestProperty("x-api-key", BuildConfig.OLYNTAQ_KEY)
+                      }
+                      val msgs = JSONArray().put(JSONObject().put("role", "user").put("content", prompt))
+                      val body = JSONObject().put("message", prompt).put("prompt", prompt).put("text", prompt).put("messages", msgs)
+                      c.outputStream.use { it.write(body.toString().toByteArray()) }
+                      if (c.responseCode >= 400) continue
+                      val txt = c.inputStream.bufferedReader().readText().trim()
+                      if (!txt.startsWith("{")) {
+                          if (txt.isNotBlank() && !txt.startsWith("<")) return txt else continue
+                      }
+                      val r = JSONObject(txt)
+                      for (k in listOf("reply", "response", "answer", "message", "text", "output", "content", "result")) {
+                          val v = r.opt(k)
+                          if (v is String && v.isNotBlank()) return v
+                      }
+                      val v2 = r.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content") ?: ""
+                      if (v2.isNotBlank()) return v2
+                  } catch (e: Exception) { }
+              }
+              return null
+          }
+          private fun groqText(prompt: String): String? {""", "title helper")
+          if len(sys.argv) > 2 and sys.argv[2] == "voice":
+              # 5) voice keeps going on the home screen; the floating bubble shows up if overlay is allowed
+              sub1("override fun onResume() { super.onResume(); Store.foreground = true }", """override fun onResume() {
+                  super.onResume(); Store.foreground = true
+                  if (VoiceFlag.bubbleStarted) { stopService(Intent(this, FloatingService::class.java)); VoiceFlag.bubbleStarted = false }
+              }""", "onResume")
+              sub1("override fun onPause() { super.onPause(); Store.foreground = false }", """override fun onPause() {
+                  super.onPause(); Store.foreground = false; Store.saveChats(this)
+                  if (VoiceFlag.active && !Store.floating && Settings.canDrawOverlays(this)) {
+                      startService(Intent(this, FloatingService::class.java)); Store.floating = true; VoiceFlag.bubbleStarted = true
+                  }
+              }""", "onPause")
           if len(sys.argv) > 2 and sys.argv[2] == "voice":
               a = s.find("@Composable fun VoiceScreen() {")
               b = s.find("@Composable fun ImageGen() {")
@@ -141,7 +252,8 @@ jobs:
           open(p, "w", encoding="utf-8").write(s)
           PY2
           if [ -f VoiceScreen.kt ]; then
-            cp VoiceScreen.kt $D/app/src/main/java/com/nexa/ai/
+            [ -f VoiceService.kt ] || { echo "ERROR: upload VoiceService.kt to the repo (next to VoiceScreen.kt)"; exit 1; }
+            cp VoiceScreen.kt VoiceService.kt $D/app/src/main/java/com/nexa/ai/
             python3 /tmp/patch.py $SRC_KT voice
           else
             python3 /tmp/patch.py $SRC_KT
@@ -270,6 +382,7 @@ jobs:
                   versionName = "1.0.0"
                   buildConfigField("String", "GEMINI_KEY", "\"${System.getenv("GEMINI_API_KEY") ?: ""}\"")
                   buildConfigField("String", "GROQ_KEY", "\"${System.getenv("GROQ_API_KEY") ?: ""}\"")
+                  buildConfigField("String", "OLYNTAQ_KEY", "\"${System.getenv("OLYNTAQ_API_KEY") ?: ""}\"")
               }
               buildFeatures { compose = true; buildConfig = true }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -293,6 +406,8 @@ jobs:
               <uses-permission android:name="android.permission.RECORD_AUDIO"/>
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
               <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
               <queries><intent><action android:name="android.speech.RecognitionService"/></intent></queries>
               <application android:label="Nexa AI" ICON_PLACEHOLDER android:theme="@style/Theme.Nexa">
@@ -303,6 +418,7 @@ jobs:
                       </intent-filter>
                   </activity>
                   <service android:name=".FloatingService" android:exported="false"/>
+                  <service android:name=".VoiceService" android:exported="false" android:foregroundServiceType="microphone"/>
               </application>
           </manifest>
           EOF
@@ -328,6 +444,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OLYNTAQ_API_KEY: ${{ secrets.OLYNTAQ_API_KEY }}
         run: gradle assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
