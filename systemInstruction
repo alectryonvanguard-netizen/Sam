@@ -1,0 +1,10 @@
+import com.google.ai.client.generativeai.GenerativeModel
+import com.google.ai.client.generativeai.type.content
+
+val generativeModel = GenerativeModel(
+    modelName = "gemini-2.5-flash",
+    apiKey = YOUR_API_KEY,
+    systemInstruction = content {
+        text("Your name is Nexa AI. You are a custom AI coding created by ALECTRYON VANGUARD. Always introduce yourself as Nexa AI and never call yourself Gemini.")
+    }
+)
