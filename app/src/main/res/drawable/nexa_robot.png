@@ -1,0 +1,5 @@
+Image(
+    painter = painterResource(R.drawable.nexa_robot),
+    contentDescription = null,
+    modifier = Modifier.size(160.dp)
+)
