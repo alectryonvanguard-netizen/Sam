@@ -29,9 +29,11 @@ jobs:
           mkdir -p $D/app/src/main/java/com/nexa/ai
           cp MainActivity.kt FloatingService.kt $D/app/src/main/java/com/nexa/ai/
 
-          # Optional branding: icon.png -> app icon, logo.png -> in-app logo
+          # Branding: root files (icon.png, robot.png, logo.png) OR
+          # app/src/main/res/drawable/nexa_robot.png and nexa_icon.png
           RES=$D/app/src/main/res
           ICON_ATTR=""
+
           if [ -f icon.png ]; then
             mkdir -p $RES/mipmap-xxxhdpi
             cp icon.png $RES/mipmap-xxxhdpi/ic_launcher.png
@@ -44,6 +46,17 @@ jobs:
           if [ -f logo.png ]; then
             mkdir -p $RES/drawable-nodpi
             cp logo.png $RES/drawable-nodpi/nexa_logo.png
+          fi
+
+          if [ -f app/src/main/res/drawable/nexa_robot.png ]; then
+            mkdir -p $RES/drawable-nodpi
+            cp app/src/main/res/drawable/nexa_robot.png $RES/drawable-nodpi/nexa_robot.png
+          fi
+          if [ -f app/src/main/res/drawable/nexa_icon.png ]; then
+            mkdir -p $RES/drawable-nodpi $RES/mipmap-xxxhdpi
+            cp app/src/main/res/drawable/nexa_icon.png $RES/drawable-nodpi/nexa_logo.png
+            cp app/src/main/res/drawable/nexa_icon.png $RES/mipmap-xxxhdpi/ic_launcher.png
+            ICON_ATTR='android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"'
           fi
 
           cat > $D/settings.gradle.kts <<'EOF'
@@ -121,6 +134,14 @@ jobs:
           EOF
 
           sed -i "s|ICON_PLACEHOLDER|$ICON_ATTR|" $D/app/src/main/AndroidManifest.xml
+
+          echo "Resources included:"
+          ls -R $RES 2>/dev/null || echo "(none)"
+
+      - name: Check API key secret
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: test -n "$GEMINI_API_KEY" || { echo "GEMINI_API_KEY SECRET IS EMPTY - add it under Settings > Secrets and variables > Actions > Secrets"; exit 1; }
 
       - name: Build debug APK
         working-directory: nexa-build
