@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -219,6 +220,9 @@ fun photoPerm() = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDI
 fun toast(c: Context, s: String) = Toast.makeText(c, s, Toast.LENGTH_SHORT).show()
 
 @Composable fun Logo(size: Dp) {
+    val ctx = LocalContext.current
+    val id = remember { ctx.resources.getIdentifier("nexa_logo", "drawable", ctx.packageName) }
+    if (id != 0) { Image(painterResource(id), null, Modifier.size(size), contentScale = ContentScale.Fit); return }
     val sh = RoundedCornerShape(size / 3.5f)
     Box(Modifier.size(size).shadow(size / 3, sh, ambientColor = Cyan, spotColor = Violet).clip(sh)
         .background(Brush.linearGradient(listOf(Color(0xFF0B1238), Color(0xFF1E1259))), sh)
