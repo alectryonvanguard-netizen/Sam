@@ -37,6 +37,10 @@ jobs:
             cp icon.png $RES/mipmap-xxxhdpi/ic_launcher.png
             ICON_ATTR='android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"'
           fi
+          if [ -f robot.png ]; then
+            mkdir -p $RES/drawable-nodpi
+            cp robot.png $RES/drawable-nodpi/nexa_robot.png
+          fi
           if [ -f logo.png ]; then
             mkdir -p $RES/drawable-nodpi
             cp logo.png $RES/drawable-nodpi/nexa_logo.png
@@ -105,7 +109,7 @@ jobs:
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
               <queries><intent><action android:name="android.speech.RecognitionService"/></intent></queries>
               <application android:label="Nexa AI" ICON_PLACEHOLDER android:theme="@android:style/Theme.Material.NoActionBar">
-                  <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
+                  <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.LAUNCHER"/>
