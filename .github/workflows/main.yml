@@ -43,6 +43,32 @@ jobs:
           if s2 == s:
               print("WARNING: Online line not found, chat header left unchanged")
           s = s2
+          # 3) Gemini: try 3.8 first, then 3.6, and retry when Google says "high demand"
+          sig = "private fun call(model: String, body: JSONObject): JSONObject {"
+          if sig in s:
+              helper = (
+                  'private val TEXT_MODELS = listOf("gemini-3.8-flash", "gemini-3.6-flash")\n'
+                  'private fun call(model: String, body: JSONObject): JSONObject {\n'
+                  '    if (!model.startsWith("gemini-3")) return callOnce(model, body)\n'
+                  '    var last = JSONObject()\n'
+                  '    for (m in TEXT_MODELS) {\n'
+                  '        for (attempt in 0..1) {\n'
+                  '            last = callOnce(m, body)\n'
+                  '            val err = last.optJSONObject("error") ?: return last\n'
+                  '            val msg = err.optString("message")\n'
+                  '            val code = err.optInt("code")\n'
+                  '            val retry = code == 503 || code == 429 || code == 404 || msg.contains("high demand", true) || msg.contains("overloaded", true)\n'
+                  '            if (!retry) return last\n'
+                  '            Thread.sleep(800)\n'
+                  '        }\n'
+                  '    }\n'
+                  '    return last\n'
+                  '}\n'
+                  'private fun callOnce(model: String, body: JSONObject): JSONObject {'
+              )
+              s = s.replace(sig, helper, 1)
+          else:
+              print("WARNING: Gemini call() not found, model fallback not added")
           if len(sys.argv) > 2 and sys.argv[2] == "voice":
               a = s.find("@Composable fun VoiceScreen() {")
               b = s.find("@Composable fun ImageGen() {")
