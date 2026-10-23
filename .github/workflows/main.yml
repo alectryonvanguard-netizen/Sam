@@ -88,12 +88,10 @@ jobs:
                   val g = groqText(prompt)
                   if (g != null) return g
               }
-              if (BuildConfig.NVIDIA_KEY.isNotBlank()) {
-                  val n = nvidiaText(prompt)
-                  if (n != null) return n
+              if (BuildConfig.OLYNTAQ_KEY.isNotBlank()) {
+                  val o = olyntaqText(prompt)
+                  if (o != null) return o
               }
-              val o = olyntaqText(prompt)
-              if (o != null) return o
               return "Error: no chat AI answered. Check your internet and your Groq and OLYNTAQ keys, then try again."
           }
           private fun groqText(prompt: String): String? {
@@ -202,56 +200,29 @@ jobs:
           }
           private fun olyntaqText(prompt: String): String? {
               val base = "https://olyntaq-api-djjp.onrender.com"
-              val urls = listOf(base + "/api/chat", base + "/chat")
-              for (u in urls) {
-                  try {
-                      val c = URL(u).openConnection() as HttpURLConnection
-                      c.connectTimeout = 8000; c.readTimeout = 30000
-                      c.requestMethod = "POST"; c.doOutput = true
-                      c.setRequestProperty("Content-Type", "application/json")
-                      if (BuildConfig.OLYNTAQ_KEY.isNotBlank()) {
+              for (path in listOf("/v1/chat/completions", "/chat/completions")) {
+                  for (m in listOf("olyntaq", "nvidia/nemotron-3.5-lightning-30b-a3b")) {
+                      try {
+                          val c = URL(base + path).openConnection() as HttpURLConnection
+                          c.connectTimeout = 10000; c.readTimeout = 60000
+                          c.requestMethod = "POST"; c.doOutput = true
+                          c.setRequestProperty("Content-Type", "application/json")
                           c.setRequestProperty("Authorization", "Bearer " + BuildConfig.OLYNTAQ_KEY)
                           c.setRequestProperty("x-api-key", BuildConfig.OLYNTAQ_KEY)
-                      }
-                      val msgs = JSONArray().put(JSONObject().put("role", "user").put("content", prompt))
-                      val body = JSONObject().put("message", prompt).put("prompt", prompt).put("text", prompt).put("messages", msgs)
-                      c.outputStream.use { it.write(body.toString().toByteArray()) }
-                      if (c.responseCode >= 400) continue
-                      val txt = c.inputStream.bufferedReader().readText().trim()
-                      if (!txt.startsWith("{")) {
-                          if (txt.isNotBlank() && !txt.startsWith("<")) return txt else continue
-                      }
-                      val r = JSONObject(txt)
-                      for (k in listOf("reply", "response", "answer", "message", "text", "output", "content", "result")) {
-                          val v = r.opt(k)
-                          if (v is String && v.isNotBlank()) return v
-                      }
-                      val v2 = r.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content") ?: ""
-                      if (v2.isNotBlank()) return v2
-                  } catch (e: Exception) { }
+                          val body = JSONObject().put("model", m)
+                              .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+                              .put("stream", false)
+                          c.outputStream.use { it.write(body.toString().toByteArray()) }
+                          if (c.responseCode == 404) break
+                          val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
+                          val r = JSONObject(txt)
+                          val v = r.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "")
+                          if (v.isNotBlank() && v != "null") return v
+                      } catch (e: java.net.SocketTimeoutException) {
+                          return null
+                      } catch (e: Exception) { }
+                  }
               }
-              return null
-          }
-          private fun nvidiaText(prompt: String): String? {
-              try {
-                  val c = URL("https://integrate.api.nvidia.com/v1/chat/completions").openConnection() as HttpURLConnection
-                  c.connectTimeout = 8000; c.readTimeout = 40000
-                  c.requestMethod = "POST"; c.doOutput = true
-                  c.setRequestProperty("Content-Type", "application/json")
-                  c.setRequestProperty("Authorization", "Bearer " + BuildConfig.NVIDIA_KEY)
-                  val body = JSONObject()
-                      .put("model", "nvidia/nemotron-3.5-lightning-30b-a3b")
-                      .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
-                      .put("temperature", 1).put("top_p", 0.95).put("max_tokens", 2048)
-                      .put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
-                      .put("stream", false)
-                  c.outputStream.use { it.write(body.toString().toByteArray()) }
-                  val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
-                  val r = JSONObject(txt)
-                  if (r.has("error")) return null
-                  val v = r.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "")
-                  if (v.isNotBlank() && v != "null") return v
-              } catch (e: Exception) { }
               return null
           }
           private fun groqText(prompt: String): String? {""", "title helper")
@@ -408,7 +379,6 @@ jobs:
                   buildConfigField("String", "GEMINI_KEY", "\"${System.getenv("GEMINI_API_KEY") ?: ""}\"")
                   buildConfigField("String", "GROQ_KEY", "\"${System.getenv("GROQ_API_KEY") ?: ""}\"")
                   buildConfigField("String", "OLYNTAQ_KEY", "\"${System.getenv("OLYNTAQ_API_KEY") ?: ""}\"")
-                  buildConfigField("String", "NVIDIA_KEY", "\"${System.getenv("NVIDIA_API_KEY") ?: ""}\"")
               }
               buildFeatures { compose = true; buildConfig = true }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -459,14 +429,12 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OLYNTAQ_API_KEY: ${{ secrets.OLYNTAQ_API_KEY }}
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
           [ -n "$GROQ_API_KEY" ] && echo "Groq key (chat): present" || echo "Groq key (chat): missing"
-          [ -n "$NVIDIA_API_KEY" ] && echo "NVIDIA key (chat): present" || echo "NVIDIA key (chat): missing"
           [ -n "$OLYNTAQ_API_KEY" ] && echo "OLYNTAQ key (chat): present" || echo "OLYNTAQ key (chat): missing"
           [ -n "$GEMINI_API_KEY" ] && echo "Gemini key (pictures): present" || echo "Gemini key (pictures): missing"
-          if [ -z "$GROQ_API_KEY" ] && [ -z "$NVIDIA_API_KEY" ] && [ -z "$OLYNTAQ_API_KEY" ]; then
-            echo "No chat key found. Add GROQ_API_KEY, NVIDIA_API_KEY and/or OLYNTAQ_API_KEY under Settings > Secrets and variables > Actions > Secrets"; exit 1
+          if [ -z "$GROQ_API_KEY" ] && [ -z "$OLYNTAQ_API_KEY" ]; then
+            echo "No chat key found. Add GROQ_API_KEY and/or OLYNTAQ_API_KEY under Settings > Secrets and variables > Actions > Secrets"; exit 1
           fi
 
       - name: Build debug APK
@@ -475,7 +443,6 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OLYNTAQ_API_KEY: ${{ secrets.OLYNTAQ_API_KEY }}
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: gradle assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
