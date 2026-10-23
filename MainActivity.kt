@@ -8,6 +8,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
@@ -15,9 +17,12 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -46,6 +51,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
@@ -93,6 +99,7 @@ object Store {
     var lang by mutableStateOf("English"); var logged by mutableStateOf(false); var floating by mutableStateOf(false)
     var busy by mutableStateOf(false); var autoListen = false; var foreground = false
     var avatar by mutableStateOf<Bitmap?>(null)
+    var voice by mutableStateOf(""); var tts: TextToSpeech? = null
     val chats = mutableStateListOf<Chat>(); var current by mutableStateOf<Chat?>(null)
     lateinit var prefs: SharedPreferences
 
@@ -100,11 +107,20 @@ object Store {
         prefs = c.getSharedPreferences("nexa", 0)
         user = prefs.getString("user", "Samuel")!!; dark = prefs.getBoolean("dark", true)
         logged = prefs.getBoolean("logged", false); lang = prefs.getString("lang", "English")!!
-        notif = prefs.getBoolean("notif", false)
+        notif = prefs.getBoolean("notif", false); voice = prefs.getString("voice", "")!!
         File(c.filesDir, "avatar.png").takeIf { it.exists() }?.let { avatar = BitmapFactory.decodeFile(it.path) }
     }
     fun save() = prefs.edit().putString("user", user).putBoolean("dark", dark).putBoolean("logged", logged)
-        .putString("lang", lang).putBoolean("notif", notif).apply()
+        .putString("lang", lang).putBoolean("notif", notif).putString("voice", voice).apply()
+    fun langTag() = when (lang) { "Español" -> "es-ES"; "Français" -> "fr-FR"; else -> "en-US" }
+    fun initTts(c: Context) { if (tts == null) tts = TextToSpeech(c.applicationContext) { } }
+    fun speak(text: String, id: String): Boolean {
+        val t = tts ?: return false
+        t.language = Locale.forLanguageTag(langTag())
+        if (voice.isNotEmpty()) t.voices?.firstOrNull { it.name == voice }?.let { t.voice = it }
+        t.speak(text.replace(Regex("[*#`_]"), "").take(3900), TextToSpeech.QUEUE_FLUSH, null, id)
+        return true
+    }
     fun setAvatar(c: Context, b: Bitmap) {
         val s = Bitmap.createScaledBitmap(b, 400, 400 * b.height / b.width, true)
         avatar = s
@@ -184,7 +200,10 @@ object Gemini {
 class MainActivity : ComponentActivity() {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
-        Store.load(this)
+        Store.load(this); Store.initTts(this)
+        val tr = android.graphics.Color.TRANSPARENT
+        if (Store.dark) enableEdgeToEdge(SystemBarStyle.dark(tr), SystemBarStyle.dark(tr))
+        else enableEdgeToEdge(SystemBarStyle.light(tr, tr), SystemBarStyle.light(tr, tr))
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("nexa", "Nexa AI", NotificationManager.IMPORTANCE_DEFAULT))
         handle(intent)
         setContent { MaterialTheme { App() } }
@@ -192,6 +211,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(i: Intent) { super.onNewIntent(i); handle(i) }
     override fun onResume() { super.onResume(); Store.foreground = true }
     override fun onPause() { super.onPause(); Store.foreground = false }
+    override fun onDestroy() { super.onDestroy(); if (isFinishing) { Store.tts?.shutdown(); Store.tts = null } }
     private fun handle(i: Intent?) {
         if (!Store.logged) return
         when (i?.getStringExtra("dest")) {
@@ -232,6 +252,9 @@ fun toast(c: Context, s: String) = Toast.makeText(c, s, Toast.LENGTH_SHORT).show
 }
 
 @Composable fun Robot(size: Dp) {
+    val rctx = LocalContext.current
+    val rid = remember { rctx.resources.getIdentifier("nexa_robot", "drawable", rctx.packageName) }
+    if (rid != 0) { Image(painterResource(rid), null, Modifier.size(size), contentScale = ContentScale.Fit); return }
     val t by rememberInfiniteTransition(label = "r").animateFloat(0.55f, 1f, infiniteRepeatable(tween(1100), RepeatMode.Reverse), label = "e")
     Canvas(Modifier.size(size)) {
         val w = this.size.width
@@ -266,10 +289,10 @@ fun toast(c: Context, s: String) = Toast.makeText(c, s, Toast.LENGTH_SHORT).show
 @Composable fun OBtn(t: String, on: () -> Unit) =
     Box(Modifier.fillMaxWidth().height(48.dp).glass(24.dp).clickable(onClick = on), Alignment.Center) { T(t, 14) }
 
-@Composable fun Field(v: String, ch: (String) -> Unit, hint: String, pw: Boolean = false, trail: @Composable (() -> Unit)? = null, single: Boolean = true) =
+@Composable fun Field(v: String, ch: (String) -> Unit, hint: String, pw: Boolean = false, trail: @Composable (() -> Unit)? = null, single: Boolean = true, lead: @Composable (() -> Unit)? = null) =
     Box(Modifier.fillMaxWidth().glass(14.dp)) {
         TextField(v, ch, Modifier.fillMaxWidth(), placeholder = { T(hint, 14, Sub) }, singleLine = single,
-            visualTransformation = if (pw) PasswordVisualTransformation() else VisualTransformation.None, trailingIcon = trail,
+            visualTransformation = if (pw) PasswordVisualTransformation() else VisualTransformation.None, trailingIcon = trail, leadingIcon = lead,
             colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
                 focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
                 focusedTextColor = Tx, unfocusedTextColor = Tx, cursorColor = Cyan))
@@ -316,7 +339,7 @@ fun toast(c: Context, s: String) = Toast.makeText(c, s, Toast.LENGTH_SHORT).show
     Box(Modifier.fillMaxSize().background(BgBrush)) {
         if (Store.dark) Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Violet.copy(.28f), Color.Transparent), Offset(900f, 0f), 1100f)))
         if (Store.dark) Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Blue.copy(.22f), Color.Transparent), Offset(0f, 2200f), 1000f)))
-        Box(Modifier.fillMaxSize().systemBarsPadding()) {
+        Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
             when (Store.screen) { "boot" -> Boot(); "welcome" -> Welcome(); "login" -> Login(); "image" -> ImageGen(); else -> Main() }
         }
     }
@@ -401,12 +424,13 @@ fun toast(c: Context, s: String) = Toast.makeText(c, s, Toast.LENGTH_SHORT).show
 @Composable fun Main() {
     val tabs = listOf(Triple("home", "Home", Icons.Default.Home), Triple("chat", "Chat", Icons.Default.Chat), Triple("voice", "Voice", Icons.Default.Mic),
         Triple("history", "History", Icons.Default.History), Triple("profile", "Profile", Icons.Default.Person))
+    val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (Store.tab) { "home" -> Home(); "chat" -> ChatScreen(); "voice" -> VoiceScreen(); "history" -> HistoryScreen(); else -> Profile() }
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Brush.horizontalGradient(listOf(Color.Transparent, Cyan.copy(.5f), Violet.copy(.5f), Color.Transparent))))
-        Row(Modifier.fillMaxWidth().background(if (Store.dark) Brush.verticalGradient(listOf(Color(0xE60A1030), Color(0xF2060818))) else Brush.verticalGradient(listOf(Color.White, Color(0xFFEFEAFF)))).padding(vertical = 8.dp)) {
+        if (Store.tab != "chat" && !imeUp) Box(Modifier.fillMaxWidth().height(1.dp).background(Brush.horizontalGradient(listOf(Color.Transparent, Cyan.copy(.5f), Violet.copy(.5f), Color.Transparent))))
+        if (Store.tab != "chat" && !imeUp) Row(Modifier.fillMaxWidth().background(if (Store.dark) Brush.verticalGradient(listOf(Color(0xE60A1030), Color(0xF2060818))) else Brush.verticalGradient(listOf(Color.White, Color(0xFFEFEAFF)))).padding(vertical = 8.dp)) {
             tabs.forEach { (k, l, ic) ->
                 val sel = Store.tab == k
                 Column(Modifier.weight(1f).clickable { Store.tab = k }, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -458,6 +482,32 @@ fun toast(c: Context, s: String) = Toast.makeText(c, s, Toast.LENGTH_SHORT).show
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u: Uri? ->
         u?.let { pic = ctx.contentResolver.openInputStream(it)?.use { s -> BitmapFactory.decodeStream(s) } } }
     val askPhoto = rememberPerm(photoPerm()) { ok -> if (ok) picker.launch("image/*") else toast(ctx, "Allow photo access to attach images") }
+    var dictating by remember { mutableStateOf(false) }
+    val drec = remember { if (SpeechRecognizer.isRecognitionAvailable(ctx)) SpeechRecognizer.createSpeechRecognizer(ctx) else null }
+    DisposableEffect(Unit) { onDispose { drec?.destroy() } }
+    fun dictate() {
+        val r = drec ?: run { toast(ctx, "No speech engine found on this phone"); return }
+        val base = input.trim()
+        r.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(p: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(v: Float) {}
+            override fun onBufferReceived(b: ByteArray?) {}
+            override fun onEndOfSpeech() { dictating = false }
+            override fun onError(e: Int) { dictating = false }
+            override fun onResults(b: Bundle?) {
+                dictating = false
+                b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { input = "$base $it".trim() }
+            }
+            override fun onPartialResults(b: Bundle?) { b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { input = "$base $it".trim() } }
+            override fun onEvent(t: Int, p: Bundle?) {}
+        })
+        r.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Store.langTag()).putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true))
+        dictating = true
+    }
+    val askMic = rememberPerm(Manifest.permission.RECORD_AUDIO) { ok -> if (ok) dictate() else toast(ctx, "Allow microphone access to dictate") }
     val msgs = Store.current?.msgs ?: emptyList<Msg>()
     val ls = rememberLazyListState()
     LaunchedEffect(msgs.size) { if (msgs.isNotEmpty()) ls.animateScrollToItem(msgs.size - 1) }
@@ -491,10 +541,36 @@ fun toast(c: Context, s: String) = Toast.makeText(c, s, Toast.LENGTH_SHORT).show
             Image(it.asImageBitmap(), null, Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
             IconButton({ pic = null }) { Icon(Icons.Default.Close, null, tint = Sub) } } }
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1f)) { Field(input, { input = it }, "Type a message...", trail = { IconButton({ askPhoto() }) { Icon(Icons.Default.AttachFile, null, tint = Sub) } }) }
+            Box(Modifier.weight(1f)) { Field(input, { input = it }, "Type a message...",
+                lead = { IconButton({ if (dictating) { drec?.stopListening(); dictating = false } else askMic() }) { Icon(Icons.Default.Mic, null, tint = if (dictating) Pink else Cyan) } },
+                trail = { IconButton({ askPhoto() }) { Icon(Icons.Default.AttachFile, null, tint = Sub) } }) }
             Spacer(Modifier.width(8.dp))
             Box(Modifier.size(48.dp).shadow(12.dp, CircleShape, ambientColor = Cyan, spotColor = Violet).clip(CircleShape).background(Grad, CircleShape).clickable {
                 if (input.isNotBlank() && !Store.busy) { Store.ask(ctx.applicationContext, input.trim(), pic, scope); input = ""; pic = null } }, Alignment.Center) { Icon(Icons.Default.Send, null, tint = Color.White) }
+        }
+    }
+}
+
+@Composable fun VoiceRow(t: String, sub: String, sel: Boolean, on: () -> Unit) =
+    Row(Modifier.fillMaxWidth().glass(12.dp).clickable(onClick = on).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) { T(t, 14, w = FontWeight.SemiBold); T(sub, 11, Sub) }
+        if (sel) Icon(Icons.Default.Check, null, tint = Cyan)
+    }
+
+@Composable fun VoicePicker(onDismiss: () -> Unit) {
+    val lang = Locale.forLanguageTag(Store.langTag()).language
+    val voices = remember { (Store.tts?.voices ?: emptySet()).filter { it.locale.language == lang }.sortedBy { it.name }.take(14) }
+    NDialog("Choose a voice", "Done", false, { onDismiss() }, onDismiss) {
+        Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            VoiceRow("Default", "Phone's standard voice", Store.voice.isEmpty()) { Store.voice = ""; Store.save(); Store.speak("Hi, I'm Nexa.", "sample") }
+            if (voices.isEmpty()) T("No other voices are installed for this language. Add more in your phone's Text-to-speech settings.", 12, Sub)
+            voices.forEachIndexed { i, v ->
+                val g = if (v.name.contains("female", true)) "Female" else if (v.name.contains("male", true)) "Male" else "Neutral"
+                val place = v.locale.displayCountry.ifBlank { v.locale.language }
+                VoiceRow("Voice ${i + 1}", "$g - $place" + if (v.isNetworkConnectionRequired) " - online" else "", Store.voice == v.name) {
+                    Store.voice = v.name; Store.save(); Store.speak("Hi, I'm Nexa. How can I help you?", "sample")
+                }
+            }
         }
     }
 }
@@ -503,63 +579,82 @@ fun toast(c: Context, s: String) = Toast.makeText(c, s, Toast.LENGTH_SHORT).show
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf("Tap to speak") }; var heard by remember { mutableStateOf("") }; var reply by remember { mutableStateOf("") }
     var level by remember { mutableStateOf(0f) }; var listening by remember { mutableStateOf(false) }
-    val tts = remember { TextToSpeech(ctx) { } }
+    var session by remember { mutableStateOf(false) }; var picker by remember { mutableStateOf(false) }
+    val main = remember { Handler(Looper.getMainLooper()) }
     val rec = remember { if (SpeechRecognizer.isRecognitionAvailable(ctx)) SpeechRecognizer.createSpeechRecognizer(ctx) else null }
-    val tag = when (Store.lang) { "Español" -> "es-ES"; "Français" -> "fr-FR"; else -> "en-US" }
-    DisposableEffect(Unit) { onDispose { rec?.destroy(); tts.stop(); tts.shutdown() } }
-    fun stop() { rec?.cancel(); tts.stop(); listening = false; level = 0f; status = "Tap to speak" }
-    fun start() {
-        if (rec == null) { toast(ctx, "No speech engine found on this phone"); return }
-        tts.stop(); heard = ""; reply = ""
-        rec.setRecognitionListener(object : RecognitionListener {
+    fun stopAll() { session = false; main.removeCallbacksAndMessages(null); rec?.cancel(); Store.tts?.stop(); listening = false; level = 0f; status = "Tap to speak" }
+    fun listen() {
+        val r = rec ?: return
+        if (!session) return
+        r.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(p: Bundle?) { status = "Listening..." }
             override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(r: Float) { level = ((r + 2f) / 12f).coerceIn(0f, 1f) }
+            override fun onRmsChanged(v: Float) { level = ((v + 2f) / 12f).coerceIn(0f, 1f) }
             override fun onBufferReceived(b: ByteArray?) {}
-            override fun onEndOfSpeech() { listening = false; status = "Thinking..." }
+            override fun onEndOfSpeech() { listening = false }
             override fun onError(e: Int) {
                 listening = false; level = 0f
-                status = if (e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) "Didn't catch that. Tap to retry" else "Mic error ($e). Tap to retry"
+                if (!session) return
+                if (e == 7 || e == 6 || e == 8 || e == 5) { r.cancel(); main.postDelayed({ listen() }, 400) }
+                else { status = "Mic error ($e). Tap to retry"; session = false }
             }
             override fun onResults(b: Bundle?) {
                 level = 0f
                 val said = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (said == null) { status = "Tap to speak"; return }
+                if (said.isNullOrBlank()) { main.postDelayed({ listen() }, 300); return }
                 heard = said; status = "Thinking..."
                 Store.ask(ctx.applicationContext, said, null, scope) { ans ->
-                    reply = ans; status = "Tap to speak"
-                    tts.language = Locale.forLanguageTag(tag); tts.speak(ans, TextToSpeech.QUEUE_FLUSH, null, "n")
+                    reply = ans
+                    if (session) { status = "Speaking..."; if (!Store.speak(ans, "reply")) listen() }
                 }
             }
             override fun onPartialResults(b: Bundle?) { b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { heard = it } }
             override fun onEvent(t: Int, p: Bundle?) {}
         })
-        rec.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        r.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, tag).putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true))
-        listening = true
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Store.langTag()).putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true))
+        listening = true; status = "Listening..."
     }
-    val askMic = rememberPerm(Manifest.permission.RECORD_AUDIO) { ok -> if (ok) start() else toast(ctx, "Allow microphone access to talk to Nexa") }
+    DisposableEffect(Unit) {
+        // after Nexa finishes speaking, keep listening until the user ends the session
+        Store.tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(id: String?) {}
+            override fun onDone(id: String?) { if (id == "reply") main.post { if (session) listen() } }
+            @Deprecated("Deprecated in Java")
+            override fun onError(id: String?) { if (id == "reply") main.post { if (session) listen() } }
+        })
+        onDispose { session = false; main.removeCallbacksAndMessages(null); rec?.destroy(); Store.tts?.stop() }
+    }
+    val askMic = rememberPerm(Manifest.permission.RECORD_AUDIO) { ok ->
+        if (ok) { session = true; heard = ""; reply = ""; Store.tts?.stop(); listen() } else toast(ctx, "Allow microphone access to talk to Nexa")
+    }
     LaunchedEffect(Unit) { if (Store.autoListen) { Store.autoListen = false; askMic() } }
     val pulse by animateFloatAsState(1f + level * 0.18f, label = "pulse")
     Column(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        T("Voice Chat", 18, w = FontWeight.SemiBold); Spacer(Modifier.height(36.dp))
-        Box(Modifier.size(230.dp).clip(CircleShape).clickable { if (listening) stop() else askMic() }, Alignment.Center) {
+        Box(Modifier.fillMaxWidth(), Alignment.Center) {
+            T("Voice Chat", 18, w = FontWeight.SemiBold)
+            Icon(Icons.Default.RecordVoiceOver, null, tint = Cyan, modifier = Modifier.align(Alignment.CenterEnd).clickable { picker = true }.padding(4.dp))
+        }
+        Spacer(Modifier.height(32.dp))
+        Box(Modifier.size(230.dp).clip(CircleShape).clickable { if (session) stopAll() else askMic() }, Alignment.Center) {
             Box(Modifier.size(230.dp * pulse).background(Brush.radialGradient(listOf(Violet.copy(.45f), Blue.copy(.15f), Color.Transparent)), CircleShape))
             Box(Modifier.size(160.dp).border(2.dp, Brush.sweepGradient(listOf(Cyan, Violet, Pink, Cyan)), CircleShape))
             Box(Modifier.size(128.dp).clip(CircleShape).background(Brush.linearGradient(listOf(Color(0xFF0B1238), Color(0xFF22126B))), CircleShape)
                 .border(3.dp, Grad, CircleShape), Alignment.Center) { Icon(Icons.Default.Mic, null, tint = Cyan, modifier = Modifier.size(56.dp)) }
         }
-        Spacer(Modifier.height(18.dp)); T(status, 17, w = FontWeight.SemiBold); T("Ask anything, get instant answers.", 12, Cyan)
-        Spacer(Modifier.height(14.dp)); Wave(level, listening || Store.busy)
+        Spacer(Modifier.height(18.dp)); T(status, 17, w = FontWeight.SemiBold)
+        T(if (session) "Listening until you tap End" else "Ask anything, get instant answers.", 12, Cyan)
+        Spacer(Modifier.height(14.dp)); Wave(level, listening || Store.busy || status == "Speaking...")
         Column(Modifier.weight(1f).fillMaxWidth().padding(vertical = 10.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (heard.isNotEmpty()) T("“$heard”", 14, Cyan, m = Modifier.fillMaxWidth(), al = TextAlign.Center)
+            if (heard.isNotEmpty()) T("\u201C$heard\u201D", 14, Cyan, m = Modifier.fillMaxWidth(), al = TextAlign.Center)
             if (reply.isNotEmpty()) Box(Modifier.fillMaxWidth().glass(14.dp).padding(12.dp)) { T(reply, 14) }
         }
         Box(Modifier.width(150.dp).height(46.dp).shadow(10.dp, RoundedCornerShape(23.dp), ambientColor = Pink, spotColor = Pink).clip(RoundedCornerShape(23.dp))
             .background(Brush.horizontalGradient(listOf(Color(0xFFFF4D6D), Color(0xFFFF2E93))), RoundedCornerShape(23.dp))
-            .clickable { stop(); reply = ""; heard = ""; Store.tab = "home" }, Alignment.Center) { T("End", 16, Color.White, FontWeight.SemiBold) }
+            .clickable { stopAll(); reply = ""; heard = ""; Store.tab = "home" }, Alignment.Center) { T("End", 16, Color.White, FontWeight.SemiBold) }
     }
+    if (picker) VoicePicker { picker = false }
 }
 
 @Composable fun ImageGen() {
@@ -634,7 +729,7 @@ fun saveImg(ctx: Context, b: Bitmap) {
     }
 
 @Composable fun Profile() {
-    val ctx = LocalContext.current; var dlg by remember { mutableStateOf("") }; var name by remember { mutableStateOf(Store.user) }
+    val ctx = LocalContext.current; var dlg by remember { mutableStateOf("") }; var name by remember { mutableStateOf(Store.user) }; var showVoice by remember { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u: Uri? ->
         u?.let { ctx.contentResolver.openInputStream(it)?.use { s -> BitmapFactory.decodeStream(s) }?.let { b -> Store.setAvatar(ctx, b) } } }
     val askPhoto = rememberPerm(photoPerm()) { ok -> if (ok) picker.launch("image/*") else toast(ctx, "Allow photo access to set a profile picture") }
@@ -657,6 +752,7 @@ fun saveImg(ctx: Context, b: Bitmap) {
                 extra = { Switch(Store.dark, { Store.dark = it; Store.save() }, colors = SwitchDefaults.colors(checkedTrackColor = Cyan, checkedThumbColor = Color.White)) })
             Item(Icons.Default.Notifications, "Notifications", if (Store.notif) "On" else "Off", { if (Store.notif) { Store.notif = false; Store.save() } else askNotif() })
             Item(Icons.Default.Language, "Language", Store.lang, { Store.lang = when (Store.lang) { "English" -> "Español"; "Español" -> "Français"; else -> "English" }; Store.save() })
+            Item(Icons.Default.RecordVoiceOver, "Voice", if (Store.voice.isEmpty()) "Default" else "Custom", { showVoice = true })
             Item(Icons.Default.Settings, "Chat Settings", on = { dlg = "chat" })
             Item(Icons.Default.Shield, "Privacy & Data", on = { dlg = "privacy" })
             Item(Icons.Default.Info, "About Nexa AI", "v1.0.0", { dlg = "about" })
@@ -673,6 +769,7 @@ fun saveImg(ctx: Context, b: Bitmap) {
             Icon(Icons.Default.Logout, null, tint = Pink); Spacer(Modifier.width(14.dp)); T("Log out", 14, Pink)
         }
     }
+    if (showVoice) VoicePicker { showVoice = false }
     if (dlg.isNotEmpty()) NDialog(
         when (dlg) { "account" -> "Account & Security"; "chat" -> "Chat Settings"; "privacy" -> "Privacy & Data"; else -> "About Nexa AI" },
         if (dlg == "about") "OK" else if (dlg == "account") "Save" else "Confirm", dlg != "about",
