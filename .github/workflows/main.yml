@@ -82,16 +82,19 @@ jobs:
           tsig = "fun text(prompt: String, bmp: Bitmap?): String {"
           if tsig in s:
               groq = """fun text(prompt: String, bmp: Bitmap?): String {
-              if (bmp == null && BuildConfig.GROQ_KEY.isNotBlank()) {
+              // Gemini is only used when a picture is attached. Normal chat: Groq, then OLYNTAQ.
+              if (bmp != null) return geminiText(prompt, bmp)
+              if (BuildConfig.GROQ_KEY.isNotBlank()) {
                   val g = groqText(prompt)
                   if (g != null) return g
               }
-              val gem = geminiText(prompt, bmp)
-              if (bmp == null && (gem.startsWith("Error") || gem.startsWith("Nexa isn't"))) {
-                  val o = olyntaqText(prompt)
-                  if (o != null) return o
+              if (BuildConfig.NVIDIA_KEY.isNotBlank()) {
+                  val n = nvidiaText(prompt)
+                  if (n != null) return n
               }
-              return gem
+              val o = olyntaqText(prompt)
+              if (o != null) return o
+              return "Error: no chat AI answered. Check your internet and your Groq and OLYNTAQ keys, then try again."
           }
           private fun groqText(prompt: String): String? {
               for (m in listOf("llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant")) {
@@ -227,6 +230,28 @@ jobs:
                       if (v2.isNotBlank()) return v2
                   } catch (e: Exception) { }
               }
+              return null
+          }
+          private fun nvidiaText(prompt: String): String? {
+              try {
+                  val c = URL("https://integrate.api.nvidia.com/v1/chat/completions").openConnection() as HttpURLConnection
+                  c.connectTimeout = 8000; c.readTimeout = 40000
+                  c.requestMethod = "POST"; c.doOutput = true
+                  c.setRequestProperty("Content-Type", "application/json")
+                  c.setRequestProperty("Authorization", "Bearer " + BuildConfig.NVIDIA_KEY)
+                  val body = JSONObject()
+                      .put("model", "nvidia/nemotron-3.5-lightning-30b-a3b")
+                      .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+                      .put("temperature", 1).put("top_p", 0.95).put("max_tokens", 2048)
+                      .put("chat_template_kwargs", JSONObject().put("enable_thinking", false))
+                      .put("stream", false)
+                  c.outputStream.use { it.write(body.toString().toByteArray()) }
+                  val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
+                  val r = JSONObject(txt)
+                  if (r.has("error")) return null
+                  val v = r.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "")
+                  if (v.isNotBlank() && v != "null") return v
+              } catch (e: Exception) { }
               return null
           }
           private fun groqText(prompt: String): String? {""", "title helper")
@@ -383,6 +408,7 @@ jobs:
                   buildConfigField("String", "GEMINI_KEY", "\"${System.getenv("GEMINI_API_KEY") ?: ""}\"")
                   buildConfigField("String", "GROQ_KEY", "\"${System.getenv("GROQ_API_KEY") ?: ""}\"")
                   buildConfigField("String", "OLYNTAQ_KEY", "\"${System.getenv("OLYNTAQ_API_KEY") ?: ""}\"")
+                  buildConfigField("String", "NVIDIA_KEY", "\"${System.getenv("NVIDIA_API_KEY") ?: ""}\"")
               }
               buildFeatures { compose = true; buildConfig = true }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -432,12 +458,16 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OLYNTAQ_API_KEY: ${{ secrets.OLYNTAQ_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
-          if [ -z "$GEMINI_API_KEY" ] && [ -z "$GROQ_API_KEY" ]; then
-            echo "No AI key found. Add GROQ_API_KEY (fast, free) and/or GEMINI_API_KEY under Settings > Secrets and variables > Actions > Secrets"; exit 1
+          [ -n "$GROQ_API_KEY" ] && echo "Groq key (chat): present" || echo "Groq key (chat): missing"
+          [ -n "$NVIDIA_API_KEY" ] && echo "NVIDIA key (chat): present" || echo "NVIDIA key (chat): missing"
+          [ -n "$OLYNTAQ_API_KEY" ] && echo "OLYNTAQ key (chat): present" || echo "OLYNTAQ key (chat): missing"
+          [ -n "$GEMINI_API_KEY" ] && echo "Gemini key (pictures): present" || echo "Gemini key (pictures): missing"
+          if [ -z "$GROQ_API_KEY" ] && [ -z "$NVIDIA_API_KEY" ] && [ -z "$OLYNTAQ_API_KEY" ]; then
+            echo "No chat key found. Add GROQ_API_KEY, NVIDIA_API_KEY and/or OLYNTAQ_API_KEY under Settings > Secrets and variables > Actions > Secrets"; exit 1
           fi
-          [ -n "$GROQ_API_KEY" ] && echo "Groq key: present" || echo "Groq key: missing (using Gemini only)"
-          [ -n "$GEMINI_API_KEY" ] && echo "Gemini key: present" || echo "Gemini key: missing"
 
       - name: Build debug APK
         working-directory: nexa-build
@@ -445,6 +475,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OLYNTAQ_API_KEY: ${{ secrets.OLYNTAQ_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: gradle assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
