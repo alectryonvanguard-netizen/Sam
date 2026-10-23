@@ -29,38 +29,46 @@ jobs:
           mkdir -p $D/app/src/main/java/com/nexa/ai
           cp MainActivity.kt FloatingService.kt $D/app/src/main/java/com/nexa/ai/
 
-          # Branding: root files (icon.png, robot.png, logo.png) OR
-          # app/src/main/res/drawable/nexa_robot.png and nexa_icon.png
+          # ---- Branding images: resized safely, skipped if they cannot be processed ----
           RES=$D/app/src/main/res
           ICON_ATTR=""
+          pip install --quiet pillow 2>/dev/null || pip install --quiet --break-system-packages pillow 2>/dev/null || true
+          cat > /tmp/rs.py <<'PY'
+          import sys
+          from PIL import Image
+          src, dst, px = sys.argv[1], sys.argv[2], int(sys.argv[3])
+          im = Image.open(src).convert("RGBA")
+          im.thumbnail((px, px))
+          im.save(dst, "PNG")
+          PY
+          rs() {
+            python3 /tmp/rs.py "$1" "$2" "$3" && return 0
+            magick "$1[0]" -resize "${3}x${3}>" PNG32:"$2" && return 0
+            convert "$1[0]" -resize "${3}x${3}>" PNG32:"$2" && return 0
+            return 1
+          }
+          pick() { for f in "$@"; do if [ -f "$f" ]; then echo "$f"; return 0; fi; done; return 0; }
 
-          if [ -f icon.png ]; then
+          ROBOT=$(pick nexa_robot.png robot.png app/src/main/res/drawable/nexa_robot.png)
+          LOGO=$(pick nexa_icon.png logo.png app/src/main/res/drawable/nexa_icon.png)
+          ICON=$(pick icon.png nexa_icon.png app/src/main/res/drawable/nexa_icon.png)
+          echo "robot=$ROBOT logo=$LOGO icon=$ICON"
+
+          if [ -n "$ROBOT" ]; then
+            mkdir -p $RES/drawable-nodpi
+            rs "$ROBOT" $RES/drawable-nodpi/nexa_robot.png 512 || { echo "robot resize failed, skipped"; rm -f $RES/drawable-nodpi/nexa_robot.png; }
+          fi
+          if [ -n "$LOGO" ]; then
+            mkdir -p $RES/drawable-nodpi
+            rs "$LOGO" $RES/drawable-nodpi/nexa_logo.png 256 || { echo "logo resize failed, skipped"; rm -f $RES/drawable-nodpi/nexa_logo.png; }
+          fi
+          if [ -n "$ICON" ]; then
             mkdir -p $RES/mipmap-xxxhdpi
-            cp icon.png $RES/mipmap-xxxhdpi/ic_launcher.png
-            ICON_ATTR='android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"'
-          fi
-          if [ -f robot.png ]; then
-            mkdir -p $RES/drawable-nodpi
-            cp robot.png $RES/drawable-nodpi/nexa_robot.png
-          fi
-          if [ -f logo.png ]; then
-            mkdir -p $RES/drawable-nodpi
-            cp logo.png $RES/drawable-nodpi/nexa_logo.png
-          fi
-
-          SRC=app/src/main/res/drawable
-          if [ -f $SRC/nexa_robot.png ]; then
-            mkdir -p $RES/drawable-nodpi
-            convert "$SRC/nexa_robot.png[0]" -auto-orient -strip -resize 512x512 PNG32:$RES/drawable-nodpi/nexa_robot.png \
-              || cp $SRC/nexa_robot.png $RES/drawable-nodpi/nexa_robot.png
-          fi
-          if [ -f $SRC/nexa_icon.png ]; then
-            mkdir -p $RES/drawable-nodpi $RES/mipmap-xxxhdpi
-            convert "$SRC/nexa_icon.png[0]" -auto-orient -strip -resize 256x256 PNG32:$RES/drawable-nodpi/nexa_logo.png \
-              || cp $SRC/nexa_icon.png $RES/drawable-nodpi/nexa_logo.png
-            convert "$SRC/nexa_icon.png[0]" -auto-orient -strip -resize 192x192 PNG32:$RES/mipmap-xxxhdpi/ic_launcher.png \
-              || cp $SRC/nexa_icon.png $RES/mipmap-xxxhdpi/ic_launcher.png
-            ICON_ATTR='android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"'
+            if rs "$ICON" $RES/mipmap-xxxhdpi/ic_launcher.png 192; then
+              ICON_ATTR='android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"'
+            else
+              echo "icon resize failed, default icon used"; rm -f $RES/mipmap-xxxhdpi/ic_launcher.png
+            fi
           fi
 
           cat > $D/settings.gradle.kts <<'EOF'
@@ -140,7 +148,7 @@ jobs:
           sed -i "s|ICON_PLACEHOLDER|$ICON_ATTR|" $D/app/src/main/AndroidManifest.xml
 
           echo "Resources included:"
-          ls -R $RES 2>/dev/null || echo "(none)"
+          find $RES -type f -exec ls -l {} \; 2>/dev/null || echo "(none)"
 
       - name: Check API key secret
         env:
