@@ -48,14 +48,18 @@ jobs:
             cp logo.png $RES/drawable-nodpi/nexa_logo.png
           fi
 
-          if [ -f app/src/main/res/drawable/nexa_robot.png ]; then
+          SRC=app/src/main/res/drawable
+          if [ -f $SRC/nexa_robot.png ]; then
             mkdir -p $RES/drawable-nodpi
-            cp app/src/main/res/drawable/nexa_robot.png $RES/drawable-nodpi/nexa_robot.png
+            convert "$SRC/nexa_robot.png[0]" -auto-orient -strip -resize 512x512 PNG32:$RES/drawable-nodpi/nexa_robot.png \
+              || cp $SRC/nexa_robot.png $RES/drawable-nodpi/nexa_robot.png
           fi
-          if [ -f app/src/main/res/drawable/nexa_icon.png ]; then
+          if [ -f $SRC/nexa_icon.png ]; then
             mkdir -p $RES/drawable-nodpi $RES/mipmap-xxxhdpi
-            cp app/src/main/res/drawable/nexa_icon.png $RES/drawable-nodpi/nexa_logo.png
-            cp app/src/main/res/drawable/nexa_icon.png $RES/mipmap-xxxhdpi/ic_launcher.png
+            convert "$SRC/nexa_icon.png[0]" -auto-orient -strip -resize 256x256 PNG32:$RES/drawable-nodpi/nexa_logo.png \
+              || cp $SRC/nexa_icon.png $RES/drawable-nodpi/nexa_logo.png
+            convert "$SRC/nexa_icon.png[0]" -auto-orient -strip -resize 192x192 PNG32:$RES/mipmap-xxxhdpi/ic_launcher.png \
+              || cp $SRC/nexa_icon.png $RES/mipmap-xxxhdpi/ic_launcher.png
             ICON_ATTR='android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"'
           fi
 
