@@ -43,32 +43,94 @@ jobs:
           if s2 == s:
               print("WARNING: Online line not found, chat header left unchanged")
           s = s2
-          # 3) Gemini: try 3.8 first, then 3.6, and retry when Google says "high demand"
+          # 3) AI calls: time limits (no more endless loading), Gemini 3.8 -> 3.6 fallback, Groq first when its key exists
           sig = "private fun call(model: String, body: JSONObject): JSONObject {"
           if sig in s:
-              helper = (
-                  'private val TEXT_MODELS = listOf("gemini-3.8-flash", "gemini-3.6-flash")\n'
-                  'private fun call(model: String, body: JSONObject): JSONObject {\n'
-                  '    if (!model.startsWith("gemini-3")) return callOnce(model, body)\n'
-                  '    var last = JSONObject()\n'
-                  '    for (m in TEXT_MODELS) {\n'
-                  '        for (attempt in 0..1) {\n'
-                  '            last = callOnce(m, body)\n'
-                  '            val err = last.optJSONObject("error") ?: return last\n'
-                  '            val msg = err.optString("message")\n'
-                  '            val code = err.optInt("code")\n'
-                  '            val retry = code == 503 || code == 429 || code == 404 || msg.contains("high demand", true) || msg.contains("overloaded", true)\n'
-                  '            if (!retry) return last\n'
-                  '            Thread.sleep(800)\n'
-                  '        }\n'
-                  '    }\n'
-                  '    return last\n'
-                  '}\n'
-                  'private fun callOnce(model: String, body: JSONObject): JSONObject {'
-              )
+              helper = """private val TEXT_MODELS = listOf("gemini-3.8-flash", "gemini-3.6-flash")
+          private fun call(model: String, body: JSONObject): JSONObject {
+              if (!model.startsWith("gemini-3")) return callOnce(model, body)
+              var last = JSONObject()
+              for (m in TEXT_MODELS) {
+                  for (attempt in 0..1) {
+                      val r = try { callOnce(m, body) } catch (e: Exception) {
+                          last = JSONObject().put("error", JSONObject().put("code", 0).put("message", "Network problem: " + e.message))
+                          break
+                      }
+                      last = r
+                      val err = r.optJSONObject("error") ?: return r
+                      val msg = err.optString("message")
+                      val code = err.optInt("code")
+                      val retry = code == 503 || code == 429 || code == 404 || msg.contains("high demand", true) || msg.contains("overloaded", true)
+                      if (!retry) return r
+                      Thread.sleep(800)
+                  }
+              }
+              return last
+          }
+          private fun callOnce(model: String, body: JSONObject): JSONObject {"""
               s = s.replace(sig, helper, 1)
           else:
               print("WARNING: Gemini call() not found, model fallback not added")
+
+          conn = "val c = u.openConnection() as HttpURLConnection"
+          if conn in s:
+              s = s.replace(conn, conn + """
+          c.connectTimeout = 8000; c.readTimeout = if (model.contains("image")) 90000 else 25000""", 1)
+          else:
+              print("WARNING: connection line not found, time limits not added")
+
+          tsig = "fun text(prompt: String, bmp: Bitmap?): String {"
+          if tsig in s:
+              groq = """fun text(prompt: String, bmp: Bitmap?): String {
+              if (bmp == null && BuildConfig.GROQ_KEY.isNotBlank()) {
+                  val g = groqText(prompt)
+                  if (g != null) return g
+              }
+              return geminiText(prompt, bmp)
+          }
+          private fun groqText(prompt: String): String? {
+              for (m in listOf("llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant")) {
+                  try {
+                      val c = URL("https://api.groq.com/openai/v1/chat/completions").openConnection() as HttpURLConnection
+                      c.connectTimeout = 8000; c.readTimeout = 20000
+                      c.requestMethod = "POST"; c.doOutput = true
+                      c.setRequestProperty("Content-Type", "application/json")
+                      c.setRequestProperty("Authorization", "Bearer " + BuildConfig.GROQ_KEY)
+                      val body = JSONObject().put("model", m).put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+                      c.outputStream.use { it.write(body.toString().toByteArray()) }
+                      val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
+                      val r = JSONObject(txt)
+                      if (r.has("error")) continue
+                      return r.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
+                  } catch (e: Exception) { }
+              }
+              return null
+          }
+          private fun geminiText(prompt: String, bmp: Bitmap?): String {"""
+              s = s.replace(tsig, groq, 1)
+          else:
+              print("WARNING: text() not found, Groq not added")
+
+          isig = "fun image(prompt: String): Pair<Bitmap?, String> {"
+          if isig in s:
+              newimg = """fun image(prompt: String): Pair<Bitmap?, String> {
+              var why = "Could not create the image. Check your internet and try again."
+              try {
+                  val q = java.net.URLEncoder.encode(prompt, "UTF-8").replace("+", "%20")
+                  val c = URL("https://image.pollinations.ai/prompt/" + q + "?width=768&height=768&nologo=true&model=flux").openConnection() as HttpURLConnection
+                  c.connectTimeout = 8000; c.readTimeout = 75000
+                  if (c.responseCode < 400) {
+                      val bytes = c.inputStream.use { it.readBytes() }
+                      val bm = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                      if (bm != null) return bm to ""
+                  } else if (c.responseCode == 429) why = "The free image service is busy. Wait about 20 seconds and try again."
+              } catch (e: Exception) { why = "Image service not reachable: " + e.message }
+              return null to why
+          }
+          private fun geminiImage(prompt: String): Pair<Bitmap?, String> {"""
+              s = s.replace(isig, newimg, 1)
+          else:
+              print("WARNING: image() not found, image fix not added")
           if len(sys.argv) > 2 and sys.argv[2] == "voice":
               a = s.find("@Composable fun VoiceScreen() {")
               b = s.find("@Composable fun ImageGen() {")
@@ -207,6 +269,7 @@ jobs:
                   versionCode = 1
                   versionName = "1.0.0"
                   buildConfigField("String", "GEMINI_KEY", "\"${System.getenv("GEMINI_API_KEY") ?: ""}\"")
+                  buildConfigField("String", "GROQ_KEY", "\"${System.getenv("GROQ_API_KEY") ?: ""}\"")
               }
               buildFeatures { compose = true; buildConfig = true }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -249,15 +312,22 @@ jobs:
           echo "Resources included:"
           find $RES -type f -exec ls -l {} \; 2>/dev/null || echo "(none)"
 
-      - name: Check API key secret
+      - name: Check API key secrets
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: test -n "$GEMINI_API_KEY" || { echo "GEMINI_API_KEY SECRET IS EMPTY - add it under Settings > Secrets and variables > Actions > Secrets"; exit 1; }
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ] && [ -z "$GROQ_API_KEY" ]; then
+            echo "No AI key found. Add GROQ_API_KEY (fast, free) and/or GEMINI_API_KEY under Settings > Secrets and variables > Actions > Secrets"; exit 1
+          fi
+          [ -n "$GROQ_API_KEY" ] && echo "Groq key: present" || echo "Groq key: missing (using Gemini only)"
+          [ -n "$GEMINI_API_KEY" ] && echo "Gemini key: present" || echo "Gemini key: missing"
 
       - name: Build debug APK
         working-directory: nexa-build
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: gradle assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
