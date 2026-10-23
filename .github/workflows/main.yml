@@ -29,6 +29,19 @@ jobs:
           mkdir -p $D/app/src/main/java/com/nexa/ai
           cp MainActivity.kt FloatingService.kt $D/app/src/main/java/com/nexa/ai/
 
+          # Optional branding: icon.png -> app icon, logo.png -> in-app logo
+          RES=$D/app/src/main/res
+          ICON_ATTR=""
+          if [ -f icon.png ]; then
+            mkdir -p $RES/mipmap-xxxhdpi
+            cp icon.png $RES/mipmap-xxxhdpi/ic_launcher.png
+            ICON_ATTR='android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"'
+          fi
+          if [ -f logo.png ]; then
+            mkdir -p $RES/drawable-nodpi
+            cp logo.png $RES/drawable-nodpi/nexa_logo.png
+          fi
+
           cat > $D/settings.gradle.kts <<'EOF'
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -91,7 +104,7 @@ jobs:
               <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
               <queries><intent><action android:name="android.speech.RecognitionService"/></intent></queries>
-              <application android:label="Nexa AI" android:theme="@android:style/Theme.Material.NoActionBar">
+              <application android:label="Nexa AI" ICON_PLACEHOLDER android:theme="@android:style/Theme.Material.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
@@ -102,6 +115,8 @@ jobs:
               </application>
           </manifest>
           EOF
+
+          sed -i "s|ICON_PLACEHOLDER|$ICON_ATTR|" $D/app/src/main/AndroidManifest.xml
 
       - name: Build debug APK
         working-directory: nexa-build
