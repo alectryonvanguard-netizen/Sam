@@ -1,7 +1,9 @@
 package com.nexa.ai
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -43,6 +45,18 @@ private class VoiceState {
     var active = false
     var spokeAt = 0L
     var listenFn: () -> Unit = {}
+    val muted = mutableSetOf<Int>()
+}
+
+// Android plays a Google "ding" every time the mic starts or stops. There is no switch for it,
+// so we mute the sound streams it can use around those moments (and always restore them).
+private fun setMute(ctx: Context, vs: VoiceState, stream: Int, mute: Boolean) {
+    val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    try {
+        if (mute) {
+            if (!am.isStreamMute(stream)) { am.adjustStreamVolume(stream, AudioManager.ADJUST_MUTE, 0); vs.muted.add(stream) }
+        } else if (vs.muted.remove(stream)) am.adjustStreamVolume(stream, AudioManager.ADJUST_UNMUTE, 0)
+    } catch (e: Exception) { vs.muted.remove(stream) }
 }
 
 private fun words(s: String): List<String> =
@@ -69,6 +83,15 @@ private fun isInterruption(heard: String, reply: String): Boolean {
     val main = remember { Handler(Looper.getMainLooper()) }
     val rec = remember { if (SpeechRecognizer.isRecognitionAvailable(ctx)) SpeechRecognizer.createSpeechRecognizer(ctx) else null }
 
+    fun mute(stream: Int, on: Boolean) = setMute(ctx, vs, stream, on)
+    fun unmuteAll() { for (st in vs.muted.toList()) mute(st, false) }
+    // short mute of the media stream around mic start/stop, only while Nexa is not talking
+    fun hush() {
+        if (vs.speaking) return
+        mute(AudioManager.STREAM_MUSIC, true)
+        main.postDelayed({ mute(AudioManager.STREAM_MUSIC, false) }, 700)
+    }
+
     fun stopSpeaking() {
         vs.speaking = false
         vs.spokeAt = System.currentTimeMillis()
@@ -77,7 +100,7 @@ private fun isInterruption(heard: String, reply: String): Boolean {
 
     fun stopAll() {
         session = false; vs.turn += 1; vs.speaking = false; vs.active = false
-        main.removeCallbacksAndMessages(null)
+        main.removeCallbacksAndMessages(null); unmuteAll()
         rec?.cancel(); Store.tts?.stop()
         level = 0f; status = "Tap to speak"
     }
@@ -104,11 +127,11 @@ private fun isInterruption(heard: String, reply: String): Boolean {
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(v: Float) { level = ((v + 2f) / 12f).coerceIn(0f, 1f) }
             override fun onBufferReceived(b: ByteArray?) {}
-            override fun onEndOfSpeech() {}
+            override fun onEndOfSpeech() { hush() }
             override fun onError(e: Int) {
                 vs.active = false; level = 0f
                 if (!session) return
-                if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) { status = "Allow microphone access"; session = false; return }
+                if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) { status = "Allow microphone access"; session = false; unmuteAll(); return }
                 val wait = if (e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) 250L else 1000L
                 main.postDelayed({ vs.listenFn() }, wait)
             }
@@ -132,6 +155,7 @@ private fun isInterruption(heard: String, reply: String): Boolean {
             }
             override fun onEvent(t: Int, p: Bundle?) {}
         })
+        hush()
         r.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Store.langTag())
@@ -159,13 +183,15 @@ private fun isInterruption(heard: String, reply: String): Boolean {
                 }
             }
         })
-        onDispose { session = false; vs.turn += 1; main.removeCallbacksAndMessages(null); rec?.destroy(); Store.tts?.stop() }
+        onDispose { session = false; vs.turn += 1; main.removeCallbacksAndMessages(null); unmuteAll(); rec?.destroy(); Store.tts?.stop() }
     }
 
     val askMic = rememberPerm(Manifest.permission.RECORD_AUDIO) { ok ->
         if (ok) {
             session = true; heard = ""; reply = ""; vs.speaking = false; vs.active = false; vs.reply = ""
-            Store.tts?.stop(); listen()
+            Store.tts?.stop()
+            mute(AudioManager.STREAM_NOTIFICATION, true); mute(AudioManager.STREAM_SYSTEM, true)
+            listen()
         } else toast(ctx, "Allow microphone access to talk to Nexa")
     }
     LaunchedEffect(Unit) { if (Store.autoListen) { Store.autoListen = false; askMic() } }
