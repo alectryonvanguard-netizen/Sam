@@ -1,0 +1,5 @@
+Image(
+    painter = painterResource(R.drawable.nexa_icon),
+    contentDescription = null,
+    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(14.dp))
+)
