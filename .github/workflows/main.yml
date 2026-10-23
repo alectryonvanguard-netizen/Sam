@@ -28,8 +28,36 @@ jobs:
           D=nexa-build
           mkdir -p $D/app/src/main/java/com/nexa/ai
           cp MainActivity.kt FloatingService.kt $D/app/src/main/java/com/nexa/ai/
+          SRC_KT=$D/app/src/main/java/com/nexa/ai/MainActivity.kt
           # Google retired gemini-2.0-flash; use the model its error message asks for
-          sed -i 's/call("gemini-2.0-flash",/call("gemini-3.8-flash",/' $D/app/src/main/java/com/nexa/ai/MainActivity.kt
+          sed -i 's/call("gemini-2.0-flash",/call("gemini-3.8-flash",/' $SRC_KT
+
+          # Patch MainActivity.kt while building:
+          #  1) chat header: remove the "Online" line, keep only the logo and the name
+          #  2) if VoiceScreen.kt exists in the repo, it replaces the old voice screen
+          cat > /tmp/patch.py <<'PY2'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p, encoding="utf-8").read()
+          s2 = re.sub(r'; T\(if \(Store\.busy\) "Typing\.\.\." else "Online", 11, Color\(0xFF34D399\)\)', '', s)
+          if s2 == s:
+              print("WARNING: Online line not found, chat header left unchanged")
+          s = s2
+          if len(sys.argv) > 2 and sys.argv[2] == "voice":
+              a = s.find("@Composable fun VoiceScreen() {")
+              b = s.find("@Composable fun ImageGen() {")
+              if a < 0 or b < 0 or b < a:
+                  print("ERROR: old VoiceScreen not found in MainActivity.kt")
+                  sys.exit(1)
+              s = s[:a] + s[b:]
+          open(p, "w", encoding="utf-8").write(s)
+          PY2
+          if [ -f VoiceScreen.kt ]; then
+            cp VoiceScreen.kt $D/app/src/main/java/com/nexa/ai/
+            python3 /tmp/patch.py $SRC_KT voice
+          else
+            python3 /tmp/patch.py $SRC_KT
+          fi
 
           # ---- Branding images: resized safely, skipped if they cannot be processed ----
           RES=$D/app/src/main/res
