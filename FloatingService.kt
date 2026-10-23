@@ -20,8 +20,13 @@ private class LogoView(c: Context) : View(c) {
     private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC); textAlign = Paint.Align.CENTER
     }
+    private val logo: Bitmap? = run {
+        val id = c.resources.getIdentifier("nexa_logo", "drawable", c.packageName)
+        if (id != 0) BitmapFactory.decodeResource(c.resources, id) else null
+    }
     override fun onDraw(c: Canvas) {
         val w = width.toFloat()
+        logo?.let { c.drawBitmap(it, null, RectF(4f, 4f, w - 4f, w - 4f), null); return }
         fill.shader = RadialGradient(w / 2, w / 2, w / 2, intArrayOf(0xFF1E1259.toInt(), 0xFF060A24.toInt()), null, Shader.TileMode.CLAMP)
         c.drawCircle(w / 2, w / 2, w / 2 - 6, fill)
         ring.shader = LinearGradient(0f, 0f, w, w, intArrayOf(C1, C3, C4), null, Shader.TileMode.CLAMP)
