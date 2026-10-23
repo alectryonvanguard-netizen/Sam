@@ -28,6 +28,8 @@ jobs:
           D=nexa-build
           mkdir -p $D/app/src/main/java/com/nexa/ai
           cp MainActivity.kt FloatingService.kt $D/app/src/main/java/com/nexa/ai/
+          # Google retired gemini-2.0-flash; use the model its error message asks for
+          sed -i 's/call("gemini-2.0-flash",/call("gemini-3.8-flash",/' $D/app/src/main/java/com/nexa/ai/MainActivity.kt
 
           # ---- Branding images: resized safely, skipped if they cannot be processed ----
           RES=$D/app/src/main/res
@@ -35,14 +37,36 @@ jobs:
           pip install --quiet pillow 2>/dev/null || pip install --quiet --break-system-packages pillow 2>/dev/null || true
           cat > /tmp/rs.py <<'PY'
           import sys
-          from PIL import Image
+          from PIL import Image, ImageDraw
           src, dst, px = sys.argv[1], sys.argv[2], int(sys.argv[3])
+          cut = len(sys.argv) > 4 and sys.argv[4] == "cut"
           im = Image.open(src).convert("RGBA")
           im.thumbnail((px, px))
+          if cut:
+              # remove the black background that touches the image edges (soft edge, keeps dark parts inside the robot)
+              T = 120
+              w, h = im.size
+              pix = im.load()
+              mask = Image.new("L", (w, h), 0)
+              mp = mask.load()
+              for y in range(h):
+                  for x in range(w):
+                      r, g, b, a = pix[x, y]
+                      if max(r, g, b) < T:
+                          mp[x, y] = 255
+              border = [(x, 0) for x in range(w)] + [(x, h - 1) for x in range(w)] + [(0, y) for y in range(h)] + [(w - 1, y) for y in range(h)]
+              for pt in border:
+                  if mp[pt] == 255:
+                      ImageDraw.floodfill(mask, pt, 128)
+              for y in range(h):
+                  for x in range(w):
+                      if mp[x, y] == 128:
+                          r, g, b, a = pix[x, y]
+                          pix[x, y] = (r, g, b, min(255, max(r, g, b) * 255 // T))
           im.save(dst, "PNG")
           PY
           rs() {
-            python3 /tmp/rs.py "$1" "$2" "$3" && return 0
+            python3 /tmp/rs.py "$1" "$2" "$3" "$4" && return 0
             magick "$1[0]" -resize "${3}x${3}>" PNG32:"$2" && return 0
             convert "$1[0]" -resize "${3}x${3}>" PNG32:"$2" && return 0
             return 1
@@ -56,11 +80,11 @@ jobs:
 
           if [ -n "$ROBOT" ]; then
             mkdir -p $RES/drawable-nodpi
-            rs "$ROBOT" $RES/drawable-nodpi/nexa_robot.png 512 || { echo "robot resize failed, skipped"; rm -f $RES/drawable-nodpi/nexa_robot.png; }
+            rs "$ROBOT" $RES/drawable-nodpi/nexa_robot.png 512 cut || { echo "robot resize failed, skipped"; rm -f $RES/drawable-nodpi/nexa_robot.png; }
           fi
           if [ -n "$LOGO" ]; then
             mkdir -p $RES/drawable-nodpi
-            rs "$LOGO" $RES/drawable-nodpi/nexa_logo.png 256 || { echo "logo resize failed, skipped"; rm -f $RES/drawable-nodpi/nexa_logo.png; }
+            rs "$LOGO" $RES/drawable-nodpi/nexa_logo.png 256 cut || { echo "logo resize failed, skipped"; rm -f $RES/drawable-nodpi/nexa_logo.png; }
           fi
           if [ -n "$ICON" ]; then
             mkdir -p $RES/mipmap-xxxhdpi
