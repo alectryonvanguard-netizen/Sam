@@ -149,6 +149,27 @@ jobs:
             fi
           fi
 
+          # Plain dark launch screen (no icon in a white box on Android 12+)
+          mkdir -p $RES/values $RES/values-v31
+          cat > $RES/values/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.Nexa" parent="@android:style/Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#FF040612</item>
+              </style>
+          </resources>
+          EOF
+          cat > $RES/values-v31/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.Nexa" parent="@android:style/Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#FF040612</item>
+                  <item name="android:windowSplashScreenBackground">#FF040612</item>
+                  <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+              </style>
+          </resources>
+          EOF
+
           cat > $D/settings.gradle.kts <<'EOF'
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -211,7 +232,7 @@ jobs:
               <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
               <queries><intent><action android:name="android.speech.RecognitionService"/></intent></queries>
-              <application android:label="Nexa AI" ICON_PLACEHOLDER android:theme="@android:style/Theme.Material.NoActionBar">
+              <application android:label="Nexa AI" ICON_PLACEHOLDER android:theme="@style/Theme.Nexa">
                   <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
