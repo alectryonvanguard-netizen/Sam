@@ -92,8 +92,10 @@ jobs:
                   val o = olyntaqText(prompt)
                   if (o != null) return o
               }
-              return "Error: no chat AI answered. Check your internet and your Groq and OLYNTAQ keys, then try again."
+              return "Error: no chat AI answered. Groq: " + groqWhy + " | OLYNTAQ: " + olyWhy
           }
+          private var groqWhy = "no Groq key in this build"
+          private var olyWhy = "no OLYNTAQ key in this build"
           private fun groqText(prompt: String): String? {
               for (m in listOf("llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant")) {
                   try {
@@ -106,9 +108,9 @@ jobs:
                       c.outputStream.use { it.write(body.toString().toByteArray()) }
                       val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
                       val r = JSONObject(txt)
-                      if (r.has("error")) continue
+                      if (r.has("error")) { groqWhy = "HTTP " + c.responseCode + " " + txt.take(110); continue }
                       return r.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
-                  } catch (e: Exception) { }
+                  } catch (e: Exception) { groqWhy = e.toString().take(110) }
               }
               return null
           }
@@ -203,6 +205,7 @@ jobs:
               for (path in listOf("/v1/chat/completions", "/chat/completions")) {
                   for (m in listOf("olyntaq", "nvidia/nemotron-3.5-lightning-30b-a3b")) {
                       try {
+                          olyWhy = ""
                           val c = URL(base + path).openConnection() as HttpURLConnection
                           c.connectTimeout = 10000; c.readTimeout = 60000
                           c.requestMethod = "POST"; c.doOutput = true
@@ -215,12 +218,14 @@ jobs:
                           c.outputStream.use { it.write(body.toString().toByteArray()) }
                           if (c.responseCode == 404) break
                           val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
+                          olyWhy = path + " HTTP " + c.responseCode + " " + txt.take(100)
                           val r = JSONObject(txt)
                           val v = r.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "")
                           if (v.isNotBlank() && v != "null") return v
                       } catch (e: java.net.SocketTimeoutException) {
+                          olyWhy = "no answer after 60 seconds (server asleep?)"
                           return null
-                      } catch (e: Exception) { }
+                      } catch (e: Exception) { olyWhy = olyWhy + " [" + e.javaClass.simpleName + "]" }
                   }
               }
               return null
