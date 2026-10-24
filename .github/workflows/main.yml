@@ -81,11 +81,35 @@ jobs:
 
           tsig = "fun text(prompt: String, bmp: Bitmap?): String {"
           if tsig in s:
-              groq = """fun text(prompt: String, bmp: Bitmap?): String {
+              groq = """private const val SHOW_DEBUG = false
+          private var failMsg = ""
+          private fun friendly(raw: String, image: Boolean = false): String {
+              val l = raw.lowercase()
+              val msg = when {
+                  l.contains("resolve host") || l.contains("unknownhost") || l.contains("no address associated") || l.contains("unreachable") || l.contains("connection abort") || l.contains("connection reset") || l.contains("failed to connect") || l.contains("connectexception") || l.contains("no route") ->
+                      "You are offline. Nexa AI can't work without internet. Please check your connection and try again."
+                  l.contains("timed out") || l.contains("timeout") -> "The connection is too slow right now. Please try again."
+                  l.contains("safety") || l.contains("blocked") || l.contains("prohibited") || l.contains("policy") -> "The AI could not do that request because of its safety rules. Please try wording it differently."
+                  l.contains("quota") || l.contains("rate limit") || l.contains("exceeded") || l.contains("429") -> if (image) "Image generation limit is over for now. Please try again later." else "The AI service has reached its limit for now. Please try again later."
+                  l.contains("high demand") || l.contains("overloaded") || l.contains("503") || l.contains("unavailable") -> "The AI service is busy right now. Please try again in a moment."
+                  else -> if (image) "Could not create the image right now. Please try again." else "Nexa AI could not answer right now. Please try again."
+              }
+              return if (SHOW_DEBUG) msg + " (" + raw.take(200) + ")" else msg
+          }
+          // Tries the chat AIs in order. Returns null when none of them answered (reason saved in failMsg).
+          private fun chain(prompt0: String, bmp: Bitmap?, hist: List<Pair<String, String>> = emptyList()): String? {
+              histTl.set(hist)
+              failMsg = ""
               val cmd = Regex("(?i)gemini access")
-              if (cmd.containsMatchIn(prompt)) return geminiText(prompt.replace(cmd, "").trim().ifBlank { "Hello" }, bmp)
-              // Gemini is only used when a picture is attached. Normal chat: Groq, then OLYNTAQ.
-              if (bmp != null) return geminiText(prompt, bmp)
+              val wantGemini = cmd.containsMatchIn(prompt0)
+              val prompt = if (wantGemini) prompt0.replace(cmd, "").trim().ifBlank { "Hello" } else prompt0
+              if (wantGemini || bmp != null) {
+                  val g = geminiText(prompt, bmp)
+                  if (!g.startsWith("Error") && !g.startsWith("Nexa isn't")) return g
+                  failMsg = g
+                  if (bmp != null && !wantGemini) return null
+                  // "gemini access" did not work: fall back to the normal chat AIs below
+              }
               if (BuildConfig.GROQ_KEY.isNotBlank()) {
                   val g = groqText(prompt)
                   if (g != null) return g
@@ -94,9 +118,110 @@ jobs:
                   val o = olyntaqText(prompt)
                   if (o != null) return o
               }
-              return "Error: no chat AI answered. Groq: " + groqWhy + " | OLYNTAQ: " + olyWhy
+              failMsg = failMsg + " Groq: " + groqWhy + " | OLYNTAQ: " + olyWhy
+              return null
           }
-          private val NEXA_SYSTEM = "You are Nexa AI, a friendly assistant inside the Nexa AI app. Your name is Nexa AI. If someone asks your name, say you are Nexa AI, and do not say you are ChatGPT or made by OpenAI. If asked which model or company powers you, say you do not know those details. Keep explanations clear and reasonably short, but never cut code short. When you write code, always put it in a fenced code block that starts with the language name, and for long programs give the complete file in one single code block with your explanation outside it. The user mostly works on coding and video editing projects."
+          private val histTl = ThreadLocal<List<Pair<String, String>>>()
+          private fun curHist(): List<Pair<String, String>> = histTl.get() ?: emptyList()
+          @Volatile private var lastImage: Bitmap? = null
+          fun takeImage(): Bitmap? { val b = lastImage; lastImage = null; return b }
+          fun isFailure(s: String): Boolean = s.startsWith("You are offline") || s.startsWith("The connection is too slow") || s.startsWith("The AI service") || s.startsWith("The AI could not") || s.startsWith("Nexa AI could not answer") || s.startsWith("Image generation limit") || s.startsWith("Could not create the image")
+          private fun msgsFor(prompt: String): JSONArray {
+              val a = JSONArray().put(JSONObject().put("role", "system").put("content", NEXA_SYSTEM))
+              for ((r, t) in curHist()) a.put(JSONObject().put("role", r).put("content", t))
+              a.put(JSONObject().put("role", "user").put("content", prompt))
+              return a
+          }
+          // Gemini wants roles to alternate, so neighbours with the same role are merged
+          private fun gemContents(parts: JSONArray): JSONArray {
+              val roles = ArrayList<String>(); val texts = ArrayList<String>()
+              for ((r, t) in curHist()) {
+                  val role = if (r == "user") "user" else "model"
+                  if (roles.isEmpty() && role != "user") continue
+                  if (roles.isNotEmpty() && roles.last() == role) texts[texts.size - 1] = texts.last() + " " + t
+                  else { roles.add(role); texts.add(t) }
+              }
+              val a = JSONArray()
+              for (i in roles.indices) a.put(JSONObject().put("role", roles[i]).put("parts", JSONArray().put(JSONObject().put("text", texts[i]))))
+              a.put(JSONObject().put("role", "user").put("parts", parts))
+              return a
+          }
+          private fun wantsImage(p: String): Boolean {
+              val l = p.lowercase().trim()
+              if (l.startsWith("/image")) return true
+              val w = " " + l.replace(Regex("[^a-z0-9 ]"), " ").trim() + " "
+              val block = listOf(" code ", " script ", " python ", " kotlin ", " java ", " function ", " program ", " editor ", " editing ", " website ", " html ", " css ", " api ", " library ", " software ", " tool ", " class ", " algorithm ", " bot ")
+              if (block.any { w.contains(it) }) return false
+              val nouns = listOf(" image ", " images ", " photo ", " photos ", " picture ", " pictures ", " pic ", " illustration ", " drawing ", " artwork ", " logo ", " wallpaper ", " poster ", " portrait ", " painting ")
+              if (nouns.none { w.contains(it) }) return false
+              var s = w.trim()
+              for (i in 0..3) for (pre in listOf("please ", "hey ", "hi ", "can you ", "could you ", "would you ", "will you ", "i want you to ", "i want to ", "i need you to ", "i would like you to ", "kindly ", "nexa ")) if (s.startsWith(pre)) s = s.removePrefix(pre)
+              val verbs = listOf("generate", "create", "draw", "make", "design", "paint", "imagine", "produce", "show", "give", "render", "sketch")
+              return verbs.any { s.startsWith(it + " ") }
+          }
+          private fun wantsEdit(p: String): Boolean {
+              val l = p.lowercase()
+              val keys = listOf("change style", "change the style", "change its style", "new style", "style to", "in the style", "restyle", "anime", "cartoon", "pixar", "ghibli", "cyberpunk", "watercolor", "oil painting", "sketch", "turn this into", "turn it into", "turn this to", "make it look", "make this look", "convert this", "convert it", "redraw", "transform this", "transform it")
+              return keys.any { l.contains(it) }
+          }
+          private fun imageSubject(p: String): String {
+              val l = p.lowercase()
+              for (k in listOf("image of ", "picture of ", "photo of ", "pic of ", "illustration of ", "drawing of ", "painting of ", "portrait of ", "poster of ", "wallpaper of ", "logo of ", "logo for ", "image showing ", "picture showing ")) {
+                  val i = l.indexOf(k)
+                  if (i >= 0) return p.substring(i + k.length).trim().ifBlank { p }
+              }
+              return p.removePrefix("/image").trim().ifBlank { p }
+          }
+          private fun geminiEdit(prompt: String, bmp: Bitmap): Bitmap? {
+              if (BuildConfig.GEMINI_KEY.isBlank()) return null
+              try {
+                  val parts = JSONArray().put(JSONObject().put("text", prompt)).put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", b64(bmp))))
+                  val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", parts)))
+                      .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("TEXT").put("IMAGE")))
+                  val r = call("gemini-3.1-flash-image-preview", body)
+                  if (r.has("error")) return null
+                  val ps = r.getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts")
+                  for (i in 0 until ps.length()) {
+                      val q = ps.getJSONObject(i)
+                      if (q.has("inlineData")) {
+                          val bytes = Base64.decode(q.getJSONObject("inlineData").getString("data"), Base64.DEFAULT)
+                          return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                      }
+                  }
+              } catch (e: Exception) { }
+              return null
+          }
+          // 1) real photo editing with Gemini (needs a Google key that allows images), 2) otherwise describe the photo and redraw it in the new style
+          private fun editPhoto(request: String, bmp: Bitmap): Pair<Bitmap?, String> {
+              val real = geminiEdit(request, bmp)
+              if (real != null) return real to "Here is your edited photo."
+              val desc = geminiText("Describe this photo in one detailed sentence (subject, clothing, pose, colors, background) so an artist could redraw it. Reply with only the description.", bmp)
+              if (desc.startsWith("Error") || desc.startsWith("Nexa isn't")) return null to friendly(desc, true)
+              val (b, err) = image(desc + ". Style: " + request)
+              if (b != null) return b to "Here is your photo in the new style. It was redrawn by AI, so some details may look different."
+              return null to err
+          }
+          fun text(prompt: String, bmp: Bitmap?, hist: List<Pair<String, String>> = emptyList(), images: Boolean = true): String {
+              lastImage = null
+              histTl.set(emptyList())
+              if (images) {
+                  val cmd = Regex("(?i)gemini access")
+                  val clean = prompt.replace(cmd, "").trim()
+                  val tag = if (cmd.containsMatchIn(prompt)) " gemini access" else ""
+                  if (bmp == null && wantsImage(clean)) {
+                      val (b, err) = image(imageSubject(clean) + tag)
+                      if (b != null) { lastImage = b; return "Here is your picture." }
+                      return err
+                  }
+                  if (bmp != null && wantsEdit(clean)) {
+                      val (b, msg) = editPhoto(clean, bmp)
+                      if (b != null) { lastImage = b }
+                      return msg
+                  }
+              }
+              return chain(prompt, bmp, hist) ?: friendly(failMsg)
+          }
+          private val NEXA_SYSTEM = "You are Nexa AI, a friendly assistant inside the Nexa AI app. Your name is Nexa AI. If someone asks your name, say you are Nexa AI, and do not say you are ChatGPT or made by OpenAI. If asked which model or company powers you, say you do not know those details. Keep explanations clear and reasonably short, but never cut code short. When you write code, always put it in a fenced code block that starts with the language name, and for long programs give the complete file in one single code block with your explanation outside it. The user mostly works on coding and video editing projects. Remember the whole conversation and stay on its topic: answer follow-up questions using the earlier messages, and only change the topic when the user does."
           private var groqWhy = "no Groq key in this build"
           private var olyWhy = "no OLYNTAQ key in this build"
           private fun groqText(prompt: String): String? {
@@ -107,7 +232,7 @@ jobs:
                       c.requestMethod = "POST"; c.doOutput = true
                       c.setRequestProperty("Content-Type", "application/json")
                       c.setRequestProperty("Authorization", "Bearer " + BuildConfig.GROQ_KEY)
-                      val body = JSONObject().put("model", m).put("messages", JSONArray().put(JSONObject().put("role", "system").put("content", NEXA_SYSTEM)).put(JSONObject().put("role", "user").put("content", prompt))).put("max_tokens", 8000)
+                      val body = JSONObject().put("model", m).put("messages", msgsFor(prompt)).put("max_tokens", 8000)
                       c.outputStream.use { it.write(body.toString().toByteArray()) }
                       val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
                       val r = JSONObject(txt)
@@ -147,23 +272,31 @@ jobs:
               } catch (e: Exception) { olyImgWhy = e.javaClass.simpleName + " " + (e.message ?: "").take(60) }
               return null
           }
-          fun image(prompt: String): Pair<Bitmap?, String> {
+          fun image(prompt0: String): Pair<Bitmap?, String> {
               val cmd = Regex("(?i)gemini access")
-              if (cmd.containsMatchIn(prompt)) return geminiImage(prompt.replace(cmd, "").trim().ifBlank { "a beautiful picture" })
+              val wantGemini = cmd.containsMatchIn(prompt0)
+              val prompt = if (wantGemini) prompt0.replace(cmd, "").trim().ifBlank { "a beautiful picture" } else prompt0
+              var why = ""
+              if (wantGemini) {
+                  val g = geminiImage(prompt)
+                  if (g.first != null) return g
+                  why = g.second
+              }
               val o = olyntaqImage(prompt)
               if (o != null) return o to ""
               var backup = ""
               try {
-                  val q = java.net.URLEncoder.encode(prompt, "UTF-8").replace("+", "%20")
-                  val c = URL("https://image.pollinations.ai/prompt/" + q + "?width=768&height=768&nologo=true&model=flux").openConnection() as HttpURLConnection
-                  c.connectTimeout = 8000; c.readTimeout = 75000
+                  val boosted = if (prompt.contains("detailed", true)) prompt else prompt + ", highly detailed, sharp focus, high resolution, professional quality"
+                  val q = java.net.URLEncoder.encode(boosted, "UTF-8").replace("+", "%20")
+                  val c = URL("https://image.pollinations.ai/prompt/" + q + "?width=1024&height=1024&nologo=true&enhance=true&model=flux&seed=" + (System.currentTimeMillis() % 100000)).openConnection() as HttpURLConnection
+                  c.connectTimeout = 8000; c.readTimeout = 120000
                   if (c.responseCode < 400) {
                       val bytes = c.inputStream.use { it.readBytes() }
                       val bm = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                       if (bm != null) return bm to ""
                   } else backup = "HTTP " + c.responseCode
               } catch (e: Exception) { backup = e.javaClass.simpleName }
-              return null to ("Could not create the image. OLYNTAQ: " + olyImgWhy + " | free backup: " + backup + ". Type gemini access in your prompt to use Gemini instead.")
+              return null to friendly(why + " | " + olyImgWhy + " | " + backup, true)
           }
           private fun geminiImage(prompt: String): Pair<Bitmap?, String> {"""
               s = s.replace(isig, newimg, 1)
@@ -194,13 +327,24 @@ jobs:
           sub1("input.isNotBlank() && !Store.busy", "input.isNotBlank()", "send while busy")
           sub1("fun langTag() = when (lang) {", """fun saveChats(c: Context) {
                   try {
-                      val arr = JSONArray()
+                      val arr = JSONArray(); val keep = HashSet<String>()
                       for (ch in chats) {
                           val ms = JSONArray()
-                          for (x in ch.msgs) ms.put(JSONObject().put("t", x.text).put("m", x.mine))
+                          for (x in ch.msgs) {
+                              val o = JSONObject().put("t", x.text).put("m", x.mine)
+                              val bm = x.img
+                              if (bm != null) {
+                                  val name = "img_" + x.id + ".jpg"; keep.add(name)
+                                  val f = File(c.filesDir, name)
+                                  if (!f.exists()) f.outputStream().use { bm.compress(Bitmap.CompressFormat.JPEG, 88, it) }
+                                  o.put("i", x.id)
+                              }
+                              ms.put(o)
+                          }
                           arr.put(JSONObject().put("title", ch.title).put("v", ch.voice).put("msgs", ms))
                       }
                       File(c.filesDir, "chats.json").writeText(arr.toString())
+                      c.filesDir.listFiles()?.forEach { if (it.name.startsWith("img_") && it.name !in keep) it.delete() }
                   } catch (e: Exception) { }
               }
               fun loadChats(c: Context) {
@@ -213,18 +357,34 @@ jobs:
                           val o = arr.getJSONObject(i)
                           val ch = Chat(o.getString("title")); ch.named = true; ch.voice = o.optBoolean("v", false)
                           val ms = o.getJSONArray("msgs")
-                          for (j in 0 until ms.length()) { val x = ms.getJSONObject(j); ch.msgs.add(Msg(x.getString("t"), x.getBoolean("m"))) }
+                          for (j in 0 until ms.length()) {
+                              val x = ms.getJSONObject(j)
+                              var bm: Bitmap? = null
+                              if (x.has("i")) {
+                                  val pf = File(c.filesDir, "img_" + x.getLong("i") + ".jpg")
+                                  if (pf.exists()) bm = BitmapFactory.decodeFile(pf.path)
+                              }
+                              val m = Msg(x.getString("t"), x.getBoolean("m"), bm)
+                              if (x.has("i")) m.id = x.getLong("i")
+                              ch.msgs.add(m)
+                          }
                           chats.add(ch)
                       }
                   } catch (e: Exception) { }
+              }
+              // what the AI gets to read: the first message (the topic) plus the latest ones
+              fun histOf(c: Chat): List<Pair<String, String>> {
+                  val all = c.msgs.dropLast(1).filter { it.text.isNotBlank() && (it.mine || !Gemini.isFailure(it.text)) }
+                  val pick = if (all.size > 16) listOf(all.first()) + all.takeLast(14) else all
+                  return pick.map { (if (it.mine) "user" else "assistant") to it.text.take(4000) }
               }
               var voiceChat: Chat? = null
               var vturn = 0
               fun askVoice(ctx: Context, text: String, scope: CoroutineScope, done: (String) -> Unit = {}) {
                   val c = voiceChat ?: Chat("Voice chat").also { it.voice = true; chats.add(0, it); voiceChat = it }
-                  c.msgs.add(Msg(text, true)); vturn += 1; val my = vturn
+                  c.msgs.add(Msg(text, true)); vturn += 1; val my = vturn; val hist = histOf(c)
                   scope.launch {
-                      val r = withContext(Dispatchers.IO) { Gemini.text(text, null) }
+                      val r = withContext(Dispatchers.IO) { Gemini.text(text, null, hist, false) }
                       if (my != vturn) return@launch
                       c.msgs.add(Msg(r, false))
                       if (!foreground) notify(ctx, "Nexa AI", r)
@@ -240,8 +400,7 @@ jobs:
               fun langTag() = when (lang) {""", "chat saving")
           sub1('prefs = c.getSharedPreferences("nexa", 0)', 'prefs = c.getSharedPreferences("nexa", 0); loadChats(c)', "load chats")
           sub1("private fun groqText(prompt: String): String? {", """fun title(q: String): String {
-              val r = text("Write a title of 2 to 5 words for the main topic of this message. Reply with only the title, no quotes. Message: " + q.take(300), null)
-              if (r.startsWith("Error") || r.startsWith("Nexa isn't")) return ""
+              val r = chain("Write a title of 2 to 5 words for the main topic of this message. Reply with only the title, no quotes. Message: " + q.take(300), null) ?: return ""
               return r.lines().first().trim().trim('"', '*', '.').take(40)
           }
           private fun olyntaqText(prompt: String): String? {
@@ -256,7 +415,7 @@ jobs:
                       c.setRequestProperty("Content-Type", "application/json")
                       c.setRequestProperty("Authorization", "Bearer " + BuildConfig.OLYNTAQ_KEY)
                       c.setRequestProperty("x-api-key", BuildConfig.OLYNTAQ_KEY)
-                      val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", NEXA_SYSTEM)).put(JSONObject().put("role", "user").put("content", prompt))
+                      val msgs = msgsFor(prompt)
                       val body = JSONObject().put("model", "olyntaq").put("messages", msgs).put("stream", false)
                           .put("message", prompt).put("prompt", prompt).put("text", prompt).put("query", prompt).put("input", prompt)
                       c.outputStream.use { it.write(body.toString().toByteArray()) }
@@ -285,10 +444,15 @@ jobs:
           private fun groqText(prompt: String): String? {""", "title helper")
 
           # 6) UI: like / dislike / copy / read-aloud buttons under every AI message, no Profile tab, mic icon for voice chats
+          sub1('{ Gemini.text(text, bmp) }', '{ Gemini.text(text, bmp, hist) }', "history to the AI")
+          sub1("c.msgs.add(Msg(text, true, bmp)); busy = true; turn += 1; val my = turn", "c.msgs.add(Msg(text, true, bmp)); busy = true; turn += 1; val my = turn; val hist = histOf(c)", "history list")
+          sub1("c.msgs.add(Msg(r, false)); busy = false", "c.msgs.add(Msg(r, false, Gemini.takeImage())); busy = false", "picture in reply")
+          sub1("Modifier.heightIn(max = 180.dp)", "Modifier.heightIn(max = 300.dp)", "bigger pictures")
+          sub1('JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", parts)))', 'JSONObject().put("contents", gemContents(parts)).put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", NEXA_SYSTEM))))', "Gemini history")
           sub1('Column(Modifier.widthIn(max = 290.dp).clip(shape)', 'Column(Modifier.widthIn(max = if (m.mine) 290.dp else 340.dp).clip(shape)', "wider AI box")
           sub1('text.replace(Regex("[*#`_]"), "")', 'text.replace(Regex("```[^`]*```"), " Code is shown on screen. ").replace(Regex("[*#`_]"), "")', "speak skips code")
           sub1('"home" -> { Store.screen = "main"; Store.tab = "home" }', '"home" -> { Store.screen = "main"; Store.tab = "home" }\n            "history" -> { Store.screen = "main"; Store.tab = "history" }', "history shortcut")
-          sub1("class Msg(val text: String, val mine: Boolean, val img: Bitmap? = null)", "class Msg(val text: String, val mine: Boolean, val img: Bitmap? = null) { var liked by mutableStateOf(0) }", "Msg class")
+          sub1("class Msg(val text: String, val mine: Boolean, val img: Bitmap? = null)", "class Msg(val text: String, val mine: Boolean, val img: Bitmap? = null) { var liked by mutableStateOf(0); var id = System.nanoTime() }", "Msg class")
           sub1(r',\s*Triple\("profile", "Profile", Icons\.Default\.Person\)', "", "profile tab", True)
           sub1("GIcon(icons[Store.chats.indexOf(c).coerceAtLeast(0) % icons.size], 42.dp)", "GIcon(if (c.voice) Icons.Default.Mic else icons[Store.chats.indexOf(c).coerceAtLeast(0) % icons.size], 42.dp)", "history icon")
           sub1("T(m.text, 14, Color.White)", "if (m.mine) T(m.text, 14, Color.White) else MsgBody(m.text)\n                if (!m.mine) MsgActions(m)", "message buttons")
@@ -358,6 +522,7 @@ jobs:
                       val t = Store.tts
                       if (t != null && t.isSpeaking) t.stop() else Store.speak(m.text, "read")
                   })
+                  m.img?.let { b -> Icon(Icons.Default.Download, null, tint = Sub, modifier = Modifier.size(20.dp).clickable { saveImg(ctx, b) }) }
                   Icon(Icons.Default.MoreHoriz, null, tint = Sub, modifier = Modifier.size(22.dp).clickable {
                       ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://olyntaq-api-djjp.onrender.com/")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                   })
