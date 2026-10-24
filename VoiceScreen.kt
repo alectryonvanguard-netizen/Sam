@@ -92,6 +92,16 @@ private fun isInterruption(heard: String, reply: String): Boolean {
         main.postDelayed({ mute(AudioManager.STREAM_MUSIC, false) }, 700)
     }
 
+    // keeps the mic alive when the app is minimized (needs the "listening" notification)
+    fun startBackground() {
+        VoiceFlag.active = true
+        try { ctx.startForegroundService(Intent(ctx, VoiceService::class.java)) } catch (e: Exception) { }
+    }
+    fun endBackground() {
+        VoiceFlag.active = false
+        try { ctx.stopService(Intent(ctx, VoiceService::class.java)) } catch (e: Exception) { }
+    }
+
     fun stopSpeaking() {
         vs.speaking = false
         vs.spokeAt = System.currentTimeMillis()
@@ -100,7 +110,7 @@ private fun isInterruption(heard: String, reply: String): Boolean {
 
     fun stopAll() {
         session = false; vs.turn += 1; vs.speaking = false; vs.active = false
-        main.removeCallbacksAndMessages(null); unmuteAll()
+        main.removeCallbacksAndMessages(null); unmuteAll(); endBackground()
         rec?.cancel(); Store.tts?.stop()
         level = 0f; status = "Tap to speak"
     }
@@ -112,8 +122,8 @@ private fun isInterruption(heard: String, reply: String): Boolean {
         val my = vs.turn
         vs.reply = ""
         heard = said; reply = ""; status = "Thinking..."
-        Store.ask(ctx.applicationContext, said, null, scope) { ans ->
-            if (my != vs.turn || !session) return@ask
+        Store.askVoice(ctx.applicationContext, said, scope) { ans ->
+            if (my != vs.turn || !session) return@askVoice
             reply = ans; vs.reply = ans
             if (Store.speak(ans, "reply")) { vs.speaking = true; status = "Speaking..." } else status = "Listening..."
         }
@@ -131,7 +141,7 @@ private fun isInterruption(heard: String, reply: String): Boolean {
             override fun onError(e: Int) {
                 vs.active = false; level = 0f
                 if (!session) return
-                if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) { status = "Allow microphone access"; session = false; unmuteAll(); return }
+                if (e == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) { status = "Allow microphone access"; session = false; unmuteAll(); endBackground(); return }
                 val wait = if (e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) 250L else 1000L
                 main.postDelayed({ vs.listenFn() }, wait)
             }
@@ -183,11 +193,12 @@ private fun isInterruption(heard: String, reply: String): Boolean {
                 }
             }
         })
-        onDispose { session = false; vs.turn += 1; main.removeCallbacksAndMessages(null); unmuteAll(); rec?.destroy(); Store.tts?.stop() }
+        onDispose { session = false; vs.turn += 1; main.removeCallbacksAndMessages(null); unmuteAll(); endBackground(); rec?.destroy(); Store.tts?.stop() }
     }
 
     val askMic = rememberPerm(Manifest.permission.RECORD_AUDIO) { ok ->
         if (ok) {
+            startBackground(); Store.voiceChat = null
             session = true; heard = ""; reply = ""; vs.speaking = false; vs.active = false; vs.reply = ""
             Store.tts?.stop()
             mute(AudioManager.STREAM_NOTIFICATION, true); mute(AudioManager.STREAM_SYSTEM, true)
@@ -195,6 +206,7 @@ private fun isInterruption(heard: String, reply: String): Boolean {
         } else toast(ctx, "Allow microphone access to talk to Nexa")
     }
     LaunchedEffect(Unit) { if (Store.autoListen) { Store.autoListen = false; askMic() } }
+    LaunchedEffect(VoiceFlag.stopTick) { if (VoiceFlag.stopTick > 0 && session) stopAll() }
 
     val pulse by animateFloatAsState(1f + level * 0.18f, label = "pulse")
     Column(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
