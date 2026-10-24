@@ -201,9 +201,9 @@ jobs:
               return r.lines().first().trim().trim('"', '*', '.').take(40)
           }
           private fun olyntaqText(prompt: String): String? {
-              val base = "https://olyntaq-api-djjp.onrender.com"
+              val base = "https://olyntaq-api.onrender.com"
               val tried = StringBuilder()
-              val paths = listOf("/api/chat", "/chat", "/v1/chat/completions", "/api/v1/chat/completions", "/api/chat/completions", "/chat/completions", "/api/message", "/api/ask", "/ask", "/api/generate", "/generate")
+              val paths = listOf("/v1/chat/completions")
               for (path in paths) {
                   try {
                       val c = URL(base + path).openConnection() as HttpURLConnection
