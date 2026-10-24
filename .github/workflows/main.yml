@@ -202,31 +202,39 @@ jobs:
           }
           private fun olyntaqText(prompt: String): String? {
               val base = "https://olyntaq-api-djjp.onrender.com"
-              for (path in listOf("/v1/chat/completions", "/chat/completions")) {
-                  for (m in listOf("olyntaq", "nvidia/nemotron-3.5-lightning-30b-a3b")) {
-                      try {
-                          olyWhy = ""
-                          val c = URL(base + path).openConnection() as HttpURLConnection
-                          c.connectTimeout = 10000; c.readTimeout = 60000
-                          c.requestMethod = "POST"; c.doOutput = true
-                          c.setRequestProperty("Content-Type", "application/json")
-                          c.setRequestProperty("Authorization", "Bearer " + BuildConfig.OLYNTAQ_KEY)
-                          c.setRequestProperty("x-api-key", BuildConfig.OLYNTAQ_KEY)
-                          val body = JSONObject().put("model", m)
-                              .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
-                              .put("stream", false)
-                          c.outputStream.use { it.write(body.toString().toByteArray()) }
-                          if (c.responseCode == 404) break
-                          val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
-                          olyWhy = path + " HTTP " + c.responseCode + " " + txt.take(100)
-                          val r = JSONObject(txt)
-                          val v = r.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "")
-                          if (v.isNotBlank() && v != "null") return v
-                      } catch (e: java.net.SocketTimeoutException) {
-                          olyWhy = "no answer after 60 seconds (server asleep?)"
-                          return null
-                      } catch (e: Exception) { olyWhy = olyWhy + " [" + e.javaClass.simpleName + "]" }
-                  }
+              val tried = StringBuilder()
+              val paths = listOf("/api/chat", "/chat", "/v1/chat/completions", "/api/v1/chat/completions", "/api/chat/completions", "/chat/completions", "/api/message", "/api/ask", "/ask", "/api/generate", "/generate")
+              for (path in paths) {
+                  try {
+                      val c = URL(base + path).openConnection() as HttpURLConnection
+                      c.connectTimeout = 10000; c.readTimeout = 60000
+                      c.requestMethod = "POST"; c.doOutput = true
+                      c.setRequestProperty("Content-Type", "application/json")
+                      c.setRequestProperty("Authorization", "Bearer " + BuildConfig.OLYNTAQ_KEY)
+                      c.setRequestProperty("x-api-key", BuildConfig.OLYNTAQ_KEY)
+                      val msgs = JSONArray().put(JSONObject().put("role", "user").put("content", prompt))
+                      val body = JSONObject().put("model", "olyntaq").put("messages", msgs).put("stream", false)
+                          .put("message", prompt).put("prompt", prompt).put("text", prompt).put("query", prompt).put("input", prompt)
+                      c.outputStream.use { it.write(body.toString().toByteArray()) }
+                      val code = c.responseCode
+                      val txt = (if (code < 400) c.inputStream else c.errorStream).bufferedReader().readText().trim()
+                      tried.append(path).append(":").append(code).append(" ")
+                      olyWhy = tried.toString() + "last reply: " + txt.take(70)
+                      if (code >= 400) continue
+                      if (!txt.startsWith("{")) {
+                          if (txt.isNotBlank() && !txt.startsWith("<")) return txt else continue
+                      }
+                      val r = JSONObject(txt)
+                      for (k in listOf("reply", "response", "answer", "message", "text", "output", "content", "result")) {
+                          val v = r.opt(k)
+                          if (v is String && v.isNotBlank()) return v
+                      }
+                      val v2 = r.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content") ?: ""
+                      if (v2.isNotBlank() && v2 != "null") return v2
+                  } catch (e: java.net.SocketTimeoutException) {
+                      olyWhy = tried.toString() + "timeout after 60 seconds (server asleep?)"
+                      return null
+                  } catch (e: Exception) { olyWhy = tried.toString() + e.javaClass.simpleName }
               }
               return null
           }
@@ -381,9 +389,9 @@ jobs:
                   targetSdk = 35
                   versionCode = 1
                   versionName = "1.0.0"
-                  buildConfigField("String", "GEMINI_KEY", "\"${System.getenv("GEMINI_API_KEY") ?: ""}\"")
-                  buildConfigField("String", "GROQ_KEY", "\"${System.getenv("GROQ_API_KEY") ?: ""}\"")
-                  buildConfigField("String", "OLYNTAQ_KEY", "\"${System.getenv("OLYNTAQ_API_KEY") ?: ""}\"")
+                  buildConfigField("String", "GEMINI_KEY", "\"${(System.getenv("GEMINI_API_KEY") ?: "").trim().trim('"')}\"")
+                  buildConfigField("String", "GROQ_KEY", "\"${(System.getenv("GROQ_API_KEY") ?: "").trim().trim('"')}\"")
+                  buildConfigField("String", "OLYNTAQ_KEY", "\"${(System.getenv("OLYNTAQ_API_KEY") ?: "").trim().trim('"')}\"")
               }
               buildFeatures { compose = true; buildConfig = true }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
