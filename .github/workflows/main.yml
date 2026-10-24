@@ -82,6 +82,8 @@ jobs:
           tsig = "fun text(prompt: String, bmp: Bitmap?): String {"
           if tsig in s:
               groq = """fun text(prompt: String, bmp: Bitmap?): String {
+              val cmd = Regex("(?i)gemini access")
+              if (cmd.containsMatchIn(prompt)) return geminiText(prompt.replace(cmd, "").trim().ifBlank { "Hello" }, bmp)
               // Gemini is only used when a picture is attached. Normal chat: Groq, then OLYNTAQ.
               if (bmp != null) return geminiText(prompt, bmp)
               if (BuildConfig.GROQ_KEY.isNotBlank()) {
@@ -94,18 +96,18 @@ jobs:
               }
               return "Error: no chat AI answered. Groq: " + groqWhy + " | OLYNTAQ: " + olyWhy
           }
-          private val NEXA_SYSTEM = "You are Nexa AI, a friendly assistant inside the Nexa AI app. Your name is Nexa AI. If someone asks your name, say you are Nexa AI, and do not say you are ChatGPT or made by OpenAI. If asked which model or company powers you, say you do not know those details. Keep answers clear and reasonably short."
+          private val NEXA_SYSTEM = "You are Nexa AI, a friendly assistant inside the Nexa AI app. Your name is Nexa AI. If someone asks your name, say you are Nexa AI, and do not say you are ChatGPT or made by OpenAI. If asked which model or company powers you, say you do not know those details. Keep explanations clear and reasonably short, but never cut code short. When you write code, always put it in a fenced code block that starts with the language name, and for long programs give the complete file in one single code block with your explanation outside it. The user mostly works on coding and video editing projects."
           private var groqWhy = "no Groq key in this build"
           private var olyWhy = "no OLYNTAQ key in this build"
           private fun groqText(prompt: String): String? {
               for (m in listOf("llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant")) {
                   try {
                       val c = URL("https://api.groq.com/openai/v1/chat/completions").openConnection() as HttpURLConnection
-                      c.connectTimeout = 8000; c.readTimeout = 20000
+                      c.connectTimeout = 8000; c.readTimeout = 60000
                       c.requestMethod = "POST"; c.doOutput = true
                       c.setRequestProperty("Content-Type", "application/json")
                       c.setRequestProperty("Authorization", "Bearer " + BuildConfig.GROQ_KEY)
-                      val body = JSONObject().put("model", m).put("messages", JSONArray().put(JSONObject().put("role", "system").put("content", NEXA_SYSTEM)).put(JSONObject().put("role", "user").put("content", prompt)))
+                      val body = JSONObject().put("model", m).put("messages", JSONArray().put(JSONObject().put("role", "system").put("content", NEXA_SYSTEM)).put(JSONObject().put("role", "user").put("content", prompt))).put("max_tokens", 8000)
                       c.outputStream.use { it.write(body.toString().toByteArray()) }
                       val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
                       val r = JSONObject(txt)
@@ -123,8 +125,34 @@ jobs:
           isig = "fun image(prompt: String): Pair<Bitmap?, String> {"
           s = s.replace("gemini-2.0-flash-preview-image-generation", "gemini-3.1-flash-image-preview")
           if isig in s:
-              newimg = """fun image(prompt: String): Pair<Bitmap?, String> {
-              var why = "Could not create the image. Check your internet and try again."
+              newimg = """private var olyImgWhy = "no OLYNTAQ key in this build"
+          private fun olyntaqImage(prompt: String): Bitmap? {
+              if (BuildConfig.OLYNTAQ_KEY.isBlank()) return null
+              try {
+                  val c = URL("https://olyntaq-api.onrender.com/v1/images/generations").openConnection() as HttpURLConnection
+                  c.connectTimeout = 10000; c.readTimeout = 90000
+                  c.requestMethod = "POST"; c.doOutput = true
+                  c.setRequestProperty("Content-Type", "application/json")
+                  c.setRequestProperty("Authorization", "Bearer " + BuildConfig.OLYNTAQ_KEY)
+                  c.setRequestProperty("x-api-key", BuildConfig.OLYNTAQ_KEY)
+                  val body = JSONObject().put("model", "olyntaq").put("prompt", prompt).put("n", 1).put("size", "1024x1024")
+                  c.outputStream.use { it.write(body.toString().toByteArray()) }
+                  val code = c.responseCode
+                  if (code >= 400) { olyImgWhy = "HTTP " + code + " " + (c.errorStream?.bufferedReader()?.readText() ?: "").take(60); return null }
+                  val d = JSONObject(c.inputStream.bufferedReader().readText()).getJSONArray("data").getJSONObject(0)
+                  val b64 = d.optString("b64_json", "")
+                  val bytes = if (b64.isNotBlank() && b64 != "null") android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                      else URL(d.getString("url")).openStream().use { it.readBytes() }
+                  return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+              } catch (e: Exception) { olyImgWhy = e.javaClass.simpleName + " " + (e.message ?: "").take(60) }
+              return null
+          }
+          fun image(prompt: String): Pair<Bitmap?, String> {
+              val cmd = Regex("(?i)gemini access")
+              if (cmd.containsMatchIn(prompt)) return geminiImage(prompt.replace(cmd, "").trim().ifBlank { "a beautiful picture" })
+              val o = olyntaqImage(prompt)
+              if (o != null) return o to ""
+              var backup = ""
               try {
                   val q = java.net.URLEncoder.encode(prompt, "UTF-8").replace("+", "%20")
                   val c = URL("https://image.pollinations.ai/prompt/" + q + "?width=768&height=768&nologo=true&model=flux").openConnection() as HttpURLConnection
@@ -133,13 +161,9 @@ jobs:
                       val bytes = c.inputStream.use { it.readBytes() }
                       val bm = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                       if (bm != null) return bm to ""
-                  } else if (c.responseCode == 429) why = "The free image service is busy. Wait about 20 seconds and try again."
-              } catch (e: Exception) { why = "Image service not reachable: " + e.message }
-              if (BuildConfig.GEMINI_KEY.isNotBlank()) {
-                  val g = geminiImage(prompt)
-                  if (g.first != null) return g
-              }
-              return null to why
+                  } else backup = "HTTP " + c.responseCode
+              } catch (e: Exception) { backup = e.javaClass.simpleName }
+              return null to ("Could not create the image. OLYNTAQ: " + olyImgWhy + " | free backup: " + backup + ". Type gemini access in your prompt to use Gemini instead.")
           }
           private fun geminiImage(prompt: String): Pair<Bitmap?, String> {"""
               s = s.replace(isig, newimg, 1)
@@ -261,12 +285,67 @@ jobs:
           private fun groqText(prompt: String): String? {""", "title helper")
 
           # 6) UI: like / dislike / copy / read-aloud buttons under every AI message, no Profile tab, mic icon for voice chats
+          sub1('Column(Modifier.widthIn(max = 290.dp).clip(shape)', 'Column(Modifier.widthIn(max = if (m.mine) 290.dp else 340.dp).clip(shape)', "wider AI box")
+          sub1('text.replace(Regex("[*#`_]"), "")', 'text.replace(Regex("```[^`]*```"), " Code is shown on screen. ").replace(Regex("[*#`_]"), "")', "speak skips code")
           sub1('"home" -> { Store.screen = "main"; Store.tab = "home" }', '"home" -> { Store.screen = "main"; Store.tab = "home" }\n            "history" -> { Store.screen = "main"; Store.tab = "history" }', "history shortcut")
           sub1("class Msg(val text: String, val mine: Boolean, val img: Bitmap? = null)", "class Msg(val text: String, val mine: Boolean, val img: Bitmap? = null) { var liked by mutableStateOf(0) }", "Msg class")
           sub1(r',\s*Triple\("profile", "Profile", Icons\.Default\.Person\)', "", "profile tab", True)
           sub1("GIcon(icons[Store.chats.indexOf(c).coerceAtLeast(0) % icons.size], 42.dp)", "GIcon(if (c.voice) Icons.Default.Mic else icons[Store.chats.indexOf(c).coerceAtLeast(0) % icons.size], 42.dp)", "history icon")
-          sub1("T(m.text, 14, Color.White)", "T(m.text, 14, Color.White)\n                if (!m.mine) MsgActions(m)", "message buttons")
-          sub1("@Composable fun ChatScreen() {", """@Composable fun MsgActions(m: Msg) {
+          sub1("T(m.text, 14, Color.White)", "if (m.mine) T(m.text, 14, Color.White) else MsgBody(m.text)\n                if (!m.mine) MsgActions(m)", "message buttons")
+          sub1("@Composable fun ChatScreen() {", """fun saveCode(ctx: Context, code: String, lang: String) {
+              val ext = when (lang.lowercase()) {
+                  "python", "py" -> "py"; "kotlin", "kt" -> "kt"; "java" -> "java"
+                  "javascript", "js" -> "js"; "typescript", "ts" -> "ts"; "html" -> "html"; "css" -> "css"
+                  "json" -> "json"; "bash", "sh", "shell" -> "sh"; "xml" -> "xml"; "c" -> "c"
+                  "cpp", "c++" -> "cpp"; "yaml", "yml" -> "yml"; "sql" -> "sql"; "markdown", "md" -> "md"
+                  else -> "txt"
+              }
+              val v = ContentValues().apply {
+                  put(MediaStore.MediaColumns.DISPLAY_NAME, "nexa_code_" + System.currentTimeMillis() + "." + ext)
+                  put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                  put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/NexaAI")
+              }
+              try {
+                  val u = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)
+                  if (u != null) {
+                      ctx.contentResolver.openOutputStream(u)?.use { it.write(code.toByteArray()) }
+                      toast(ctx, "Saved to Downloads/NexaAI")
+                  } else toast(ctx, "Could not save the file")
+              } catch (e: Exception) { toast(ctx, "Could not save: " + e.message) }
+          }
+          @Composable fun CodeBox(raw: String) {
+              val ctx = LocalContext.current
+              val nl = raw.indexOf(Char(10))
+              val first = if (nl >= 0) raw.substring(0, nl).trim() else ""
+              val hasLang = nl >= 0 && first.length <= 15 && !first.contains(' ')
+              val lang = if (hasLang) first else ""
+              val code = (if (hasLang) raw.substring(nl + 1) else raw).trim(Char(10)).trimEnd()
+              Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF050818)).border(1.dp, Cyan.copy(.35f), RoundedCornerShape(12.dp))) {
+                  Row(Modifier.fillMaxWidth().background(Color(0xFF111A44)).padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                      T(if (lang.isEmpty()) "code" else lang, 11, Sub, m = Modifier.weight(1f))
+                      T("Copy", 12, Cyan, FontWeight.SemiBold, Modifier.clickable {
+                          val cb = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                          cb.setPrimaryClip(ClipData.newPlainText("Nexa AI code", code)); toast(ctx, "Code copied")
+                      }.padding(8.dp))
+                      T("Save file", 12, Cyan, FontWeight.SemiBold, Modifier.clickable { saveCode(ctx, code, lang) }.padding(8.dp))
+                  }
+                  Box(Modifier.horizontalScroll(rememberScrollState()).padding(10.dp)) {
+                      Text(code, color = Color(0xFFD7E3FF), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                  }
+              }
+          }
+          @Composable fun MsgBody(text: String) {
+              val parts = text.split("```")
+              Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                  parts.forEachIndexed { i, part ->
+                      if (i % 2 == 0) {
+                          val t = part.trim().replace("**", "").replace(Regex("(?m)^#{1,6}[ ]*"), "")
+                          if (t.isNotBlank()) T(t, 14, Color.White)
+                      } else CodeBox(part)
+                  }
+              }
+          }
+          @Composable fun MsgActions(m: Msg) {
               val ctx = LocalContext.current
               Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
                   Icon(Icons.Default.ThumbUp, null, tint = if (m.liked == 1) Cyan else Sub, modifier = Modifier.size(20.dp).clickable { m.liked = if (m.liked == 1) 0 else 1 })
