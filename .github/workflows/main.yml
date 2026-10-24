@@ -94,6 +94,7 @@ jobs:
               }
               return "Error: no chat AI answered. Groq: " + groqWhy + " | OLYNTAQ: " + olyWhy
           }
+          private val NEXA_SYSTEM = "You are Nexa AI, a friendly assistant inside the Nexa AI app. Your name is Nexa AI. If someone asks your name, say you are Nexa AI, and do not say you are ChatGPT or made by OpenAI. If asked which model or company powers you, say you do not know those details. Keep answers clear and reasonably short."
           private var groqWhy = "no Groq key in this build"
           private var olyWhy = "no OLYNTAQ key in this build"
           private fun groqText(prompt: String): String? {
@@ -104,7 +105,7 @@ jobs:
                       c.requestMethod = "POST"; c.doOutput = true
                       c.setRequestProperty("Content-Type", "application/json")
                       c.setRequestProperty("Authorization", "Bearer " + BuildConfig.GROQ_KEY)
-                      val body = JSONObject().put("model", m).put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+                      val body = JSONObject().put("model", m).put("messages", JSONArray().put(JSONObject().put("role", "system").put("content", NEXA_SYSTEM)).put(JSONObject().put("role", "user").put("content", prompt)))
                       c.outputStream.use { it.write(body.toString().toByteArray()) }
                       val txt = (if (c.responseCode < 400) c.inputStream else c.errorStream).bufferedReader().readText()
                       val r = JSONObject(txt)
@@ -212,7 +213,7 @@ jobs:
                       c.setRequestProperty("Content-Type", "application/json")
                       c.setRequestProperty("Authorization", "Bearer " + BuildConfig.OLYNTAQ_KEY)
                       c.setRequestProperty("x-api-key", BuildConfig.OLYNTAQ_KEY)
-                      val msgs = JSONArray().put(JSONObject().put("role", "user").put("content", prompt))
+                      val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", NEXA_SYSTEM)).put(JSONObject().put("role", "user").put("content", prompt))
                       val body = JSONObject().put("model", "olyntaq").put("messages", msgs).put("stream", false)
                           .put("message", prompt).put("prompt", prompt).put("text", prompt).put("query", prompt).put("input", prompt)
                       c.outputStream.use { it.write(body.toString().toByteArray()) }
