@@ -156,7 +156,7 @@ jobs:
 
           sub1("var busy by mutableStateOf(false);", "var turn = 0; var busy by mutableStateOf(false);", "Store.busy")
           sub1(r"class Chat\(val title: String\)\s*\{\s*val msgs = mutableStateListOf<Msg>\(\)\s*\}",
-               "class Chat(title0: String) { var title by mutableStateOf(title0); var named = false; val msgs = mutableStateListOf<Msg>() }", "Chat class", True)
+               "class Chat(title0: String) { var title by mutableStateOf(title0); var named = false; var voice = false; val msgs = mutableStateListOf<Msg>() }", "Chat class", True)
           sub1("c.msgs.add(Msg(text, true, bmp)); busy = true", "c.msgs.add(Msg(text, true, bmp)); busy = true; turn += 1; val my = turn", "ask start")
           sub1("c.msgs.add(Msg(r, false)); busy = false", "if (my != turn) return@launch\n        c.msgs.add(Msg(r, false)); busy = false", "ask reply")
           sub1("done(r)", """done(r)
@@ -174,7 +174,7 @@ jobs:
                       for (ch in chats) {
                           val ms = JSONArray()
                           for (x in ch.msgs) ms.put(JSONObject().put("t", x.text).put("m", x.mine))
-                          arr.put(JSONObject().put("title", ch.title).put("msgs", ms))
+                          arr.put(JSONObject().put("title", ch.title).put("v", ch.voice).put("msgs", ms))
                       }
                       File(c.filesDir, "chats.json").writeText(arr.toString())
                   } catch (e: Exception) { }
@@ -187,12 +187,31 @@ jobs:
                       chats.clear()
                       for (i in 0 until arr.length()) {
                           val o = arr.getJSONObject(i)
-                          val ch = Chat(o.getString("title")); ch.named = true
+                          val ch = Chat(o.getString("title")); ch.named = true; ch.voice = o.optBoolean("v", false)
                           val ms = o.getJSONArray("msgs")
                           for (j in 0 until ms.length()) { val x = ms.getJSONObject(j); ch.msgs.add(Msg(x.getString("t"), x.getBoolean("m"))) }
                           chats.add(ch)
                       }
                   } catch (e: Exception) { }
+              }
+              var voiceChat: Chat? = null
+              var vturn = 0
+              fun askVoice(ctx: Context, text: String, scope: CoroutineScope, done: (String) -> Unit = {}) {
+                  val c = voiceChat ?: Chat("Voice chat").also { it.voice = true; chats.add(0, it); voiceChat = it }
+                  c.msgs.add(Msg(text, true)); vturn += 1; val my = vturn
+                  scope.launch {
+                      val r = withContext(Dispatchers.IO) { Gemini.text(text, null) }
+                      if (my != vturn) return@launch
+                      c.msgs.add(Msg(r, false))
+                      if (!foreground) notify(ctx, "Nexa AI", r)
+                      done(r)
+                      if (!c.named) {
+                          c.named = true
+                          val t = withContext(Dispatchers.IO) { Gemini.title(text) }
+                          if (t.isNotBlank()) c.title = t
+                      }
+                      saveChats(ctx)
+                  }
               }
               fun langTag() = when (lang) {""", "chat saving")
           sub1('prefs = c.getSharedPreferences("nexa", 0)', 'prefs = c.getSharedPreferences("nexa", 0); loadChats(c)', "load chats")
@@ -240,6 +259,32 @@ jobs:
               return null
           }
           private fun groqText(prompt: String): String? {""", "title helper")
+
+          # 6) UI: like / dislike / copy / read-aloud buttons under every AI message, no Profile tab, mic icon for voice chats
+          sub1('"home" -> { Store.screen = "main"; Store.tab = "home" }', '"home" -> { Store.screen = "main"; Store.tab = "home" }\n            "history" -> { Store.screen = "main"; Store.tab = "history" }', "history shortcut")
+          sub1("class Msg(val text: String, val mine: Boolean, val img: Bitmap? = null)", "class Msg(val text: String, val mine: Boolean, val img: Bitmap? = null) { var liked by mutableStateOf(0) }", "Msg class")
+          sub1(r',\s*Triple\("profile", "Profile", Icons\.Default\.Person\)', "", "profile tab", True)
+          sub1("GIcon(icons[Store.chats.indexOf(c).coerceAtLeast(0) % icons.size], 42.dp)", "GIcon(if (c.voice) Icons.Default.Mic else icons[Store.chats.indexOf(c).coerceAtLeast(0) % icons.size], 42.dp)", "history icon")
+          sub1("T(m.text, 14, Color.White)", "T(m.text, 14, Color.White)\n                if (!m.mine) MsgActions(m)", "message buttons")
+          sub1("@Composable fun ChatScreen() {", """@Composable fun MsgActions(m: Msg) {
+              val ctx = LocalContext.current
+              Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                  Icon(Icons.Default.ThumbUp, null, tint = if (m.liked == 1) Cyan else Sub, modifier = Modifier.size(20.dp).clickable { m.liked = if (m.liked == 1) 0 else 1 })
+                  Icon(Icons.Default.ThumbDown, null, tint = if (m.liked == -1) Pink else Sub, modifier = Modifier.size(20.dp).clickable { m.liked = if (m.liked == -1) 0 else -1 })
+                  Icon(Icons.Default.ContentCopy, null, tint = Sub, modifier = Modifier.size(20.dp).clickable {
+                      val cb = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      cb.setPrimaryClip(ClipData.newPlainText("Nexa AI", m.text)); toast(ctx, "Copied")
+                  })
+                  Icon(Icons.Default.VolumeUp, null, tint = Sub, modifier = Modifier.size(20.dp).clickable {
+                      val t = Store.tts
+                      if (t != null && t.isSpeaking) t.stop() else Store.speak(m.text, "read")
+                  })
+                  Icon(Icons.Default.MoreHoriz, null, tint = Sub, modifier = Modifier.size(22.dp).clickable {
+                      ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://olyntaq-api-djjp.onrender.com/")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                  })
+              }
+          }
+          @Composable fun ChatScreen() {""", "message buttons helper")
           if len(sys.argv) > 2 and sys.argv[2] == "voice":
               # 5) voice keeps going on the home screen; the floating bubble shows up if overlay is allowed
               sub1("override fun onResume() { super.onResume(); Store.foreground = true }", """override fun onResume() {
@@ -354,6 +399,97 @@ jobs:
           </resources>
           EOF
 
+          # Home-screen widget with Ask / Voice / Image / History buttons
+          mkdir -p $RES/layout $RES/xml $RES/drawable
+          cat > $RES/drawable/widget_bg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient android:startColor="#FF0A1030" android:endColor="#FF22126B" android:angle="315"/>
+              <corners android:radius="24dp"/>
+              <stroke android:width="1dp" android:color="#663B82F6"/>
+          </shape>
+          EOF
+          cat > $RES/drawable/widget_btn.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#26FFFFFF"/>
+              <corners android:radius="16dp"/>
+          </shape>
+          EOF
+          cat > $RES/layout/nexa_widget.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="vertical" android:padding="12dp"
+              android:background="@drawable/widget_bg">
+              <TextView android:id="@+id/w_title" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="Nexa AI" android:textColor="#FFFFFFFF" android:textSize="16sp" android:textStyle="bold"/>
+              <LinearLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+                  android:layout_marginTop="8dp" android:orientation="horizontal">
+                  <LinearLayout android:id="@+id/w_ask" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1"
+                      android:layout_margin="3dp" android:gravity="center" android:orientation="vertical" android:background="@drawable/widget_btn">
+                      <ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@android:drawable/ic_menu_edit"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Ask" android:textColor="#FFFFFFFF" android:textSize="12sp"/>
+                  </LinearLayout>
+                  <LinearLayout android:id="@+id/w_voice" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1"
+                      android:layout_margin="3dp" android:gravity="center" android:orientation="vertical" android:background="@drawable/widget_btn">
+                      <ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@android:drawable/ic_btn_speak_now"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Voice" android:textColor="#FFFFFFFF" android:textSize="12sp"/>
+                  </LinearLayout>
+                  <LinearLayout android:id="@+id/w_image" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1"
+                      android:layout_margin="3dp" android:gravity="center" android:orientation="vertical" android:background="@drawable/widget_btn">
+                      <ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@android:drawable/ic_menu_gallery"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Image" android:textColor="#FFFFFFFF" android:textSize="12sp"/>
+                  </LinearLayout>
+                  <LinearLayout android:id="@+id/w_history" android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1"
+                      android:layout_margin="3dp" android:gravity="center" android:orientation="vertical" android:background="@drawable/widget_btn">
+                      <ImageView android:layout_width="24dp" android:layout_height="24dp" android:src="@android:drawable/ic_menu_recent_history"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="History" android:textColor="#FFFFFFFF" android:textSize="12sp"/>
+                  </LinearLayout>
+              </LinearLayout>
+          </LinearLayout>
+          EOF
+          cat > $RES/xml/nexa_widget_info.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="250dp" android:minHeight="110dp"
+              android:targetCellWidth="4" android:targetCellHeight="2"
+              android:updatePeriodMillis="0"
+              android:initialLayout="@layout/nexa_widget"
+              android:resizeMode="horizontal|vertical"
+              android:widgetCategory="home_screen"/>
+          EOF
+          cat > $D/app/src/main/java/com/nexa/ai/NexaWidget.kt <<'EOF'
+          package com.nexa.ai
+
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.Context
+          import android.content.Intent
+          import android.widget.RemoteViews
+
+          class NexaWidget : AppWidgetProvider() {
+              override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+                  for (id in ids) {
+                      val v = RemoteViews(context.packageName, R.layout.nexa_widget)
+                      v.setOnClickPendingIntent(R.id.w_title, open(context, "home", 10))
+                      v.setOnClickPendingIntent(R.id.w_ask, open(context, "ask", 11))
+                      v.setOnClickPendingIntent(R.id.w_voice, open(context, "voice", 12))
+                      v.setOnClickPendingIntent(R.id.w_image, open(context, "image", 13))
+                      v.setOnClickPendingIntent(R.id.w_history, open(context, "history", 14))
+                      manager.updateAppWidget(id, v)
+                  }
+              }
+
+              private fun open(c: Context, dest: String, code: Int): PendingIntent {
+                  val i = Intent(c, MainActivity::class.java).putExtra("dest", dest)
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                  return PendingIntent.getActivity(c, code, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+              }
+          }
+          EOF
+
           cat > $D/settings.gradle.kts <<'EOF'
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -429,6 +565,10 @@ jobs:
                   </activity>
                   <service android:name=".FloatingService" android:exported="false"/>
                   <service android:name=".VoiceService" android:exported="false" android:foregroundServiceType="microphone"/>
+                  <receiver android:name=".NexaWidget" android:exported="true">
+                      <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter>
+                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/nexa_widget_info"/>
+                  </receiver>
               </application>
           </manifest>
           EOF
